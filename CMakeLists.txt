@@ -3,7 +3,13 @@ project(motor_api C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-add_compile_options(-Wall -Wextra -Werror -O2)
+
+option(MOTOR_API_WERROR "Treat warnings as errors" OFF)
+
+add_compile_options(-Wall -Wextra -O2)
+if(MOTOR_API_WERROR)
+  add_compile_options(-Werror)
+endif()
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 

@@ -86,7 +86,7 @@ typedef struct {
  */
 typedef struct motor_api_handle {
     ec_master_t *master;
-    ec_domain_t *domain;0-[;]
+    ec_domain_t *domain;
     ec_master_state_t master_state;
     ec_domain_state_t domain_state;
     ec_slave_config_t *sc[MA_MAX_SLAVES];
