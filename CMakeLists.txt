@@ -13,10 +13,18 @@ endif()
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-add_library(motor_api_static STATIC src/motor_api.c)
+add_library(motor_api_static STATIC
+  src/motor_api.c
+  src/motor_api_common.c
+  src/motor_api_net.c
+)
 target_link_libraries(motor_api_static ethercat pthread)
 
-add_library(motor_api_shared SHARED src/motor_api.c)
+add_library(motor_api_shared SHARED
+  src/motor_api.c
+  src/motor_api_common.c
+  src/motor_api_net.c
+)
 target_link_libraries(motor_api_shared ethercat pthread)
 set_target_properties(motor_api_shared PROPERTIES OUTPUT_NAME motor_api)
 
@@ -33,4 +41,4 @@ install(TARGETS motor_api_static motor_api_shared example_csp test_read test_eth
         RUNTIME DESTINATION bin
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib)
-install(FILES include/motor_api.h DESTINATION include)
+install(FILES include/motor_api.h include/motor_api_common.h include/motor_api_net.h include/motor_api_types.h DESTINATION include)

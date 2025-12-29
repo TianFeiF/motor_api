@@ -28,9 +28,15 @@
 ├── README.md                   # 项目文档（本文件）
 ├── .gitignore                  # 忽略构建产物（build/ 等）
 ├── include/
-│   └── motor_api.h             # 对外 API 头文件：句柄、状态码、ENI 结构、函数声明
+│   ├── motor_api.h             # 对外 API 聚合头：包含 types/common/net，并声明核心 EtherCAT API
+│   ├── motor_api_types.h       # 公共类型：错误码、句柄前置声明、ENI 解析结构体等
+│   ├── motor_api_common.h      # 通用能力：时间函数、ENI(XML) 解析与辅助查询（不依赖 ecrt.h）
+│   └── motor_api_net.h         # 网络能力：HTTP 控制/诊断接口（socket + 轻量解析）
 ├── src/
-│   └── motor_api.c             # 库实现：ENI 解析、PDO 注册、DC、状态机、HTTP 服务等
+│   ├── motor_api.c             # EtherCAT 核心实现：主站生命周期、PDO 注册、DC、状态机、周期控制
+│   ├── motor_api_common.c      # 通用实现：ENI 解析、ENI 文件选择、产品名提取、时间函数等
+│   ├── motor_api_net.c         # 网络实现：HTTP 服务线程、控制路由与简易 JSON 解析
+│   └── motor_api_internal.h    # 内部头文件：内部句柄与 PDO 读写封装（包含 ecrt.h）
 ├── examples/
 │   ├── example_csp.c           # 示例：按固定周期运行 CSP，支持指定 ENI 路径
 │   ├── test_read.c             # 示例：读取并打印 ENI 解析结果与 PDO Entry 列表
@@ -43,7 +49,8 @@
 关键文件说明：
 
 - `include/motor_api.h`
-  - API 入口：`motor_api_create()` / `motor_api_destroy()`
+  - 对外统一入口：只需要 include 这一个头文件
+  - EtherCAT 核心：`motor_api_create()` / `motor_api_destroy()` / `motor_api_run_once()`
   - 周期控制：`motor_api_run_once()` / `motor_api_set_command()`
   - HTTP 服务：`motor_api_start_http()` / `motor_api_stop_http()`
   - ENI 解析：`motor_api_read_eni()` / `motor_api_free_eni_slaves()`
@@ -53,7 +60,12 @@
   - 通过 `ecrt.h` 调用 IgH EtherCAT Master API
   - 按 ENI 动态注册 PDO entry，并将域偏移缓存为内部 offsets
   - 周期调用中推进 CiA-402 控制字，并更新目标位置（CSP）
-  - 内置 socket 实现简易 HTTP 服务器与 JSON 解析
+- `src/motor_api_common.c`
+  - 轻量 ENI(XML) 解析与容错扫描（不依赖 XML 第三方库）
+  - ENI 辅助能力：选择目录中最新 xml、提取产品名称映射等
+- `src/motor_api_net.c`
+  - 基于 socket 的轻量 HTTP 服务（/status、/diag、/control 等）
+  - 简易 JSON 字符串解析（不依赖第三方 JSON 库）
 
 ## 3. 安装与配置指南
 
@@ -87,6 +99,10 @@ cmake --build build -j
 ```bash
 cmake --install build
 ```
+
+安装内容包含：
+- 库文件：`libmotor_api.so`、`libmotor_api_static.a`
+- 头文件：`motor_api.h`、`motor_api_types.h`、`motor_api_common.h`、`motor_api_net.h`
 
 自定义安装前缀示例：
 
@@ -162,13 +178,15 @@ sudo ./build/example_csp ./doc/HCFAX3E.xml
 
 ### 4.3 HTTP 控制与诊断
 
-调用 `motor_api_start_http(handle, port)` 启动 HTTP 服务后，可通过以下端点访问（详见 `include/motor_api.h` 与 `src/motor_api.c`）：
+调用 `motor_api_start_http(handle, port)` 启动 HTTP 服务后，可通过以下端点访问（详见 `include/motor_api_net.h` 与 `src/motor_api_net.c`）：
 
-- `GET /`：健康检查，返回 `motor_api running`
+- `GET /`：返回调试页面 `test/control.html`（若文件不存在则返回 404）
 - `GET /status`：返回当前运行参数（`run/dir/step`）
 - `GET /diag`：返回诊断 JSON（状态字/模式/跟随误差/错误码等）
 - `POST /control`：下发运行指令，Body 示例：`{"direction":"forward","step":500}`
 - `POST /stop`：停止运行
+- `POST /control_axis`：下发单轴运行指令，Body 示例：`{"axis":0,"direction":1,"step":500}`
+- `POST /stop_axis`：停止单轴，Body 示例：`{"axis":0}`
 - `POST /shutdown`：关闭 HTTP 服务线程
 
 `curl` 示例（假设端口为 8080）：
@@ -180,6 +198,8 @@ curl http://127.0.0.1:8080/diag
 
 curl -X POST http://127.0.0.1:8080/control -d '{"direction":"forward","step":500}'
 curl -X POST http://127.0.0.1:8080/stop
+curl -X POST http://127.0.0.1:8080/control_axis -d '{"axis":0,"direction":1,"step":500}'
+curl -X POST http://127.0.0.1:8080/stop_axis -d '{"axis":0}'
 curl -X POST http://127.0.0.1:8080/shutdown
 ```
 
@@ -188,8 +208,8 @@ curl -X POST http://127.0.0.1:8080/shutdown
 ### 5.1 代码贡献规范
 
 - 建议使用统一格式：4 空格缩进、保持现有命名风格与错误码返回模式（`ma_status_t`）
-- 编译选项启用了 `-Wall -Wextra -Werror`，新增代码需保证无告警
-- 对外 API 优先放在 `include/motor_api.h`，实现放在 `src/motor_api.c`
+- 编译选项默认启用了 `-Wall -Wextra`；可通过 `-DMOTOR_API_WERROR=ON` 打开 `-Werror`
+- 对外 API 优先放在 `include/motor_api.h`（聚合头）；实现按模块拆分在 `src/` 下
 
 ### 5.2 测试方法说明
 
@@ -233,4 +253,3 @@ cmake --install build
 - `GET /diag` 的 JSON 输出目前按固定 3 轴格式化（见 `src/motor_api.c` 中 `format_diag()`），当从站数量不为 3 时信息不完整
 - HTTP 服务为最小实现：无鉴权、无 TLS、JSON 解析容错有限，建议仅用于内网联调
 - `motor_api_destroy()` 不会自动停止 HTTP 线程；若启用了 HTTP 服务，建议在销毁前显式调用 `motor_api_stop_http()`
-
