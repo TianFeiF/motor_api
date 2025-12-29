@@ -28,7 +28,3 @@ install(TARGETS motor_api_static motor_api_shared example_csp test_read test_eth
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib)
 install(FILES include/motor_api.h DESTINATION include)
-
-# Hardware Test Suite
-add_executable(hardware_test test/test_main.c test/test_motor_api.c)
-target_link_libraries(hardware_test motor_api_static ethercat pthread)

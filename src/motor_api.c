@@ -86,7 +86,7 @@ typedef struct {
  */
 typedef struct motor_api_handle {
     ec_master_t *master;
-    ec_domain_t *domain;
+    ec_domain_t *domain;0-[;]
     ec_master_state_t master_state;
     ec_domain_state_t domain_state;
     ec_slave_config_t *sc[MA_MAX_SLAVES];
@@ -108,10 +108,15 @@ typedef struct motor_api_handle {
     int http_port;
     volatile sig_atomic_t stop;
 
-    pthread_mutex_t cmd_mutex; /* 命令互斥，保护 run/dir/step */
-    bool cmd_run;              /* 运行标志 */
-    int cmd_dir;               /* 方向：-1/0/1 */
-    int cmd_step;              /* 步长/速度（内部限制范围） */
+    pthread_mutex_t cmd_mutex; /* 命令互斥，保护全局 run/dir/step 与单轴配置 */
+    bool cmd_run;              /* 全局运行标志 */
+    int cmd_dir;               /* 全局方向：-1/0/1 */
+    int cmd_step;              /* 全局步长/速度（内部限制范围） */
+
+    /* 单轴独立控制参数 (与全局指令取或逻辑，或替代逻辑) */
+    bool axis_run[MA_MAX_SLAVES];
+    int axis_dir[MA_MAX_SLAVES];
+    int axis_step[MA_MAX_SLAVES];
 
     int32_t last_actual_pos[MA_MAX_SLAVES]; /* 上次实际位置快照 */
     uint32_t time_cnt[MA_MAX_SLAVES];       /* 轴内时间计数（调试/预热） */
@@ -719,6 +724,52 @@ static int parse_control_json(const char *body, int *out_dir, int *out_step) {
     *out_dir = dir; *out_step = (int)step; return 0;
 }
 
+/* 删除旧的 format_diag 定义，防止重复 */
+/* 已经在上文定义 */
+
+/*
+ * 函数: parse_control_json
+ * 功能: 简单解析 JSON 字符串 (兼容旧实现，防止重复定义)。
+ * 注意：此前可能在文件更早的位置已有定义，如果编译器报错重定义，需移除此处的定义。
+ */
+/* 
+ * 检查：parse_control_json 在之前文件版本中位于 line 700 左右。
+ * 为避免重复，我们将其声明为前置声明或者直接复用。
+ * 但由于 static 函数作用域限制，最好合并。
+ * 当前我们采取的策略是：删除这里重复插入的 parse_control_json，
+ * 仅保留 parse_axis_control_json。
+ */
+
+/*
+ * 函数: parse_axis_control_json
+ * 功能: 解析单轴控制 JSON，格式 {"axis":1, "direction":1, "step":500}
+ */
+static int parse_axis_control_json(const char *json, int *axis, int *dir, int *step) {
+    if (!json || !axis || !dir || !step) return -1;
+    *axis = -1; *dir = 0; *step = 0;
+    
+    // 简易解析，不依赖 JSON 库
+    const char *p = strstr(json, "\"axis\"");
+    if (p) {
+        const char *cl = strchr(p, ':');
+        if (cl) *axis = (int)strtol(cl + 1, NULL, 10);
+    }
+    
+    p = strstr(json, "\"direction\"");
+    if (p) {
+        const char *cl = strchr(p, ':');
+        if (cl) *dir = (int)strtol(cl + 1, NULL, 10);
+    }
+    
+    p = strstr(json, "\"step\"");
+    if (p) {
+        const char *cl = strchr(p, ':');
+        if (cl) *step = (int)strtol(cl + 1, NULL, 10);
+    }
+    
+    return (*axis >= 0) ? 0 : -1;
+}
+
 /*
  * 函数: format_diag
  * 功能: 汇总各轴关键诊断数据并生成 JSON 字符串。
@@ -750,8 +801,23 @@ static ma_status_t format_diag(motor_api_handle_t *h, char *buf, size_t buf_size
 }
 
 /*
+ * 函数: parse_axis_control_json (已移至函数外部)
+ * 功能: 解析单轴控制 JSON，格式 {"axis":1, "direction":1, "step":500}
+ */
+/* static int parse_axis_control_json 之前已在文件前部定义，这里不需要再次定义 */
+/* 但之前的 replace 可能导致了嵌套定义或位置错误，需要修正 */
+
+/* 
+ * 修正策略：
+ * 1. 确保 parse_axis_control_json 只有一个定义，且在 http_thread_fn 之前。
+ * 2. 确保 motor_api_run_once 中的 run 变量被使用。
+ */
+
+/* 删除此处错误的嵌套定义 */
+
+/*
  * 函数: http_thread_fn
- * 功能: HTTP 服务线程入口，处理基本控制与诊断请求。
+ * 功能: 简单的 HTTP 服务线程，处理 GET/POST 请求。
  */
 static void *http_thread_fn(void *arg) {
     motor_api_handle_t *h = (motor_api_handle_t *)arg;
@@ -792,7 +858,27 @@ static void *http_thread_fn(void *arg) {
             const char *sp = strchr(path, ' ');
             size_t plen = sp ? (size_t)(sp - path) : 0;
             if (plen == 1 && path[0] == '/') {
-                http_send(cfd, "200 OK", "text/plain", "motor_api running");
+                // 托管静态网页 test/control.html
+                FILE *f = fopen("test/control.html", "rb");
+                if (f) {
+                    fseek(f, 0, SEEK_END);
+                    long fsize = ftell(f);
+                    fseek(f, 0, SEEK_SET);
+                    char *html_buf = malloc(fsize + 1);
+                    if (html_buf) {
+                        size_t r = fread(html_buf, 1, fsize, f);
+                        (void)r; // 忽略返回值警告
+                        html_buf[fsize] = 0;
+                        http_send(cfd, "200 OK", "text/html", html_buf);
+                        free(html_buf);
+                    } else {
+                        http_send(cfd, "500 Internal Error", "text/plain", "malloc failed");
+                    }
+                    fclose(f);
+                } else {
+                    http_send(cfd, "404 Not Found", "text/plain", "control.html not found (run from project root)");
+                }
+
                 close(cfd);
                 continue;
             }
@@ -828,6 +914,50 @@ static void *http_thread_fn(void *arg) {
             size_t plen = sp ? (size_t)(sp - path) : 0;
             const char *hdr_end = strstr(buf, "\r\n\r\n");
             const char *body = hdr_end ? (hdr_end + 4) : NULL;
+/*
+ * 函数: parse_axis_control_json (已移至函数外部)
+ * 功能: 解析单轴控制 JSON，格式 {"axis":1, "direction":1, "step":500}
+ */
+/* static int parse_axis_control_json 之前已在文件前部定义，这里不需要再次定义 */
+/* 但之前的 replace 可能导致了嵌套定义或位置错误，需要修正 */
+
+/* 
+ * 修正策略：
+ * 1. 确保 parse_axis_control_json 只有一个定义，且在 http_thread_fn 之前。
+ * 2. 确保 motor_api_run_once 中的 run 变量被使用。
+ */
+
+/* 删除此处错误的嵌套定义 */
+
+/* 在 http_thread_fn 中添加单轴控制端点 */
+// ...
+            if (plen && strncmp(path, "/control_axis", plen) == 0) {
+                int axis = -1, dir = 0, step = 0;
+                int rc = parse_axis_control_json(body, &axis, &dir, &step);
+                if (rc == 0) {
+                    motor_api_set_axis_command(h, axis, true, dir, step);
+                    http_send(cfd, "200 OK", "application/json", "{\"ok\":true}");
+                } else {
+                    http_send(cfd, "400 Bad Request", "application/json", "{\"ok\":false, \"msg\":\"invalid axis\"}");
+                }
+                close(cfd);
+                continue;
+            }
+            
+            if (plen && strncmp(path, "/stop_axis", plen) == 0) {
+                int axis = -1, dir = 0, step = 0;
+                // 复用解析，主要获取 axis
+                parse_axis_control_json(body, &axis, &dir, &step);
+                if (axis >= 0) {
+                    motor_api_set_axis_command(h, axis, false, 0, 0);
+                    http_send(cfd, "200 OK", "application/json", "{\"ok\":true}");
+                } else {
+                    http_send(cfd, "400 Bad Request", "application/json", "{\"ok\":false}");
+                }
+                close(cfd);
+                continue;
+            }
+
             if (plen && strncmp(path, "/control", plen) == 0) {
                 int dir = 0, step = 0;
                 int rc = parse_control_json(body, &dir, &step);
@@ -1370,6 +1500,25 @@ EXTERNFUNC ma_status_t motor_api_set_command(struct motor_api_handle *handle, bo
 }
 
 /*
+ * 函数: motor_api_set_axis_command
+ * 功能: 设置单轴独立运行指令（线程安全）。
+ */
+EXTERNFUNC ma_status_t motor_api_set_axis_command(struct motor_api_handle *handle, int axis_idx, bool run, int dir, int step) {
+    motor_api_handle_t *h = (motor_api_handle_t *)handle; if (!h) return MA_ERR_PARAM;
+    if (axis_idx < 0 || axis_idx >= h->slave_count) return MA_ERR_PARAM;
+    if (step < 1) step = 1;
+    if (step > 100000) step = 100000;
+    if (dir != -1 && dir != 0 && dir != 1) dir = 0;
+
+    pthread_mutex_lock(&h->cmd_mutex);
+    h->axis_run[axis_idx] = run;
+    h->axis_dir[axis_idx] = dir;
+    h->axis_step[axis_idx] = step;
+    pthread_mutex_unlock(&h->cmd_mutex);
+    return MA_OK;
+}
+
+/*
  * 函数: motor_api_format_diag_json
  * 功能: 诊断信息格式化为 JSON。
  */
@@ -1462,15 +1611,33 @@ EXTERNFUNC ma_status_t motor_api_run_once(struct motor_api_handle *handle) {
             } else {
                 /* 延迟栅栏已触发：按命令增量推进目标（限幅与预热） */
                 pthread_mutex_lock(&h->cmd_mutex);
-                bool run = h->cmd_run;
-                int dir = h->cmd_dir;
-                int step = h->cmd_step;
+                /* 优先使用单轴指令，如果单轴指令有效（run=true），则覆盖全局指令；否则叠加或仅用全局 */
+                /* 策略：如果单轴 run=true，则使用单轴参数；否则使用全局参数 */
+                bool run = h->axis_run[i] ? true : h->cmd_run;
+                int dir  = h->axis_run[i] ? h->axis_dir[i] : h->cmd_dir;
+                int step = h->axis_run[i] ? h->axis_step[i] : h->cmd_step;
                 pthread_mutex_unlock(&h->cmd_mutex);
+
                 int delta = run ? (dir * step) : 0;
                 if (delta > MA_MAX_DELTA_PER_CYCLE) delta = MA_MAX_DELTA_PER_CYCLE;
                 if (delta < -MA_MAX_DELTA_PER_CYCLE) delta = -MA_MAX_DELTA_PER_CYCLE;
-                if (h->csp_warmup[i] > 0) { h->csp_target[i] = MA_RD_S32(h, h->in[i].actualPosition); h->csp_warmup[i]--; }
-                else { h->csp_target[i] += delta; }
+                
+                /* HCFA 从站 1-3 特殊处理：如果状态机刚进入 enabled 且尚未收到运动指令，保持当前位置 */
+                /* 已经在 csp_warmup 处理了初始跳变，这里主要确保 delta 能够正确作用 */
+                
+                if (h->csp_warmup[i] > 0) { 
+                    h->csp_target[i] = MA_RD_S32(h, h->in[i].actualPosition); 
+                    h->csp_warmup[i]--; 
+                } else { 
+                    h->csp_target[i] += delta; 
+                }
+                
+                /* 调试：当有运动指令时，打印 delta 和 target，帮助排查为何不转动 */
+                if (run && (dbg_tick % 100 == 0)) {
+                     printf("[DEBUG%d] run=%d dir=%d step=%d delta=%d warm=%d tgt=%d act=%d\n", 
+                            i, run, dir, step, delta, h->csp_warmup[i], h->csp_target[i], MA_RD_S32(h, h->in[i].actualPosition));
+                }
+
                 MA_WR_S32(h, h->out[i].targetPosition, h->csp_target[i]);
                 MA_WR_U16(h, h->out[i].controlWord, 0x0F);
                 MA_WR_S8(h, h->out[i].workModeOut, (int8_t)MA_MODE_CSP);
@@ -1487,9 +1654,20 @@ EXTERNFUNC ma_status_t motor_api_run_once(struct motor_api_handle *handle) {
     }
     {
         /* 栅栏逻辑：检测全轴使能后武装，延时 1s 后统一开始运动 */
-        pthread_mutex_lock(&h->cmd_mutex); bool run = h->cmd_run; pthread_mutex_unlock(&h->cmd_mutex);
+        pthread_mutex_lock(&h->cmd_mutex); 
+        bool run = h->cmd_run;
+        /* 只要有任意一个轴单独运行，或者全局运行，都触发栅栏逻辑 */
+        for(uint16_t i=0; i<h->slave_count; ++i) if(h->axis_run[i]) run = true;
+        pthread_mutex_unlock(&h->cmd_mutex);
+        
+        /* 消除未使用变量警告 */
+        (void)run;
+
         int all_enabled = 1; for (uint16_t i = 0; i < h->slave_count; ++i) all_enabled = all_enabled && h->seen_enabled[i];
-        if (!h->motion_started && run) {
+        if (!h->motion_started) {
+             /* 即使没有全局 run，只要 all_enabled 就允许进入 armed 状态，以便单轴控制随时启动 */
+             /* 修改逻辑：只要全轴使能，就自动 ARM 并 FIRE，不再等待 run 指令 */
+             /* 这样可以解除 "必须先发 run 才能动" 的限制，单轴控制可以直接生效 */
             if (!h->barrier_armed && all_enabled) {
                 h->barrier_armed = 1; h->barrier_start_ns = monotonic_ns();
                 printf("[BARRIER_ARM] all at 0x027 (enabled), wait 1s\n");

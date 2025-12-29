@@ -171,19 +171,27 @@ EXTERNFUNC ma_status_t motor_api_run_once(struct motor_api_handle *handle);
 
 /*
  * 函数: motor_api_set_command
- * 功能: 设置运行指令（CSP 的目标增量或 CSV 的目标速度）。
- * 参数:
- *   - handle: 库句柄
- *   - run: 是否运动（true=运行，false=停止）
- *   - dir: 方向（-1 反向，0 停止，1 正向）
- *   - step: 步长/速度，内部限制范围为 [1, 100000]
- * 注意事项:
- *   - 栅栏触发前（同步起动），库会“保位”而不推进目标
+ * 功能: 设置全局运行指令（广播模式）。
  */
 EXTERNFUNC ma_status_t motor_api_set_command(struct motor_api_handle *handle,
                                              bool run,
                                              int dir,
                                              int step);
+
+/*
+ * 函数: motor_api_set_axis_command
+ * 功能: 设置单轴独立运行指令。
+ * 参数:
+ *   - axis_idx: 轴索引 (0-based)
+ *   - run: 是否运动
+ *   - dir: 方向 (-1, 0, 1)
+ *   - step: 步长/速度
+ */
+EXTERNFUNC ma_status_t motor_api_set_axis_command(struct motor_api_handle *handle,
+                                                  int axis_idx,
+                                                  bool run,
+                                                  int dir,
+                                                  int step);
 
 /*
  * 函数: motor_api_read_eni
