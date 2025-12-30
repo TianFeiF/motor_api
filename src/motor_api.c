@@ -567,6 +567,265 @@ EXTERNFUNC ma_status_t motor_api_format_diag_json(struct motor_api_handle *handl
 }
 
 /*
+ * 函数: motor_api_clear_error
+ * 功能: 请求对指定轴（或全轴）执行 CiA-402 Fault Reset/清错序列。
+ * 参数:
+ * - handle: motor_api_create 创建的句柄
+ * - axis_idx: 0-based 轴索引；-1 表示所有轴
+ * 返回:
+ * - MA_OK 成功；MA_ERR_PARAM 参数非法
+ * 说明:
+ * - 本函数只设置内部“清错请求计数”，真正的控制字脉冲在 motor_api_run_once 周期里执行。
+ */
+EXTERNFUNC ma_status_t motor_api_clear_error(struct motor_api_handle *handle, int axis_idx) {
+    motor_api_handle_t *h = (motor_api_handle_t *)handle; if (!h) return MA_ERR_PARAM;
+    pthread_mutex_lock(&h->cmd_mutex);
+    if (axis_idx == -1) {
+        for (uint16_t i = 0; i < h->slave_count; ++i) {
+            h->fault_reset_cycles[i] = 2;
+            h->servo_enabled[i] = false;
+            h->csp_warmup[i] = 10;
+        }
+        h->motion_started = 0;
+        h->barrier_armed = 0;
+    } else {
+        if (axis_idx < 0 || axis_idx >= (int)h->slave_count) { 
+            pthread_mutex_unlock(&h->cmd_mutex); 
+            return MA_ERR_PARAM; 
+        }
+        h->fault_reset_cycles[axis_idx] = 2;
+        h->servo_enabled[axis_idx] = false;
+        h->csp_warmup[axis_idx] = 10;
+    }
+    pthread_mutex_unlock(&h->cmd_mutex);
+    return MA_OK;
+}
+
+/*
+ * motor_api_write_csp_defaults
+ * 功能: 写入 CSP 模式与插补控制的默认值，确保周期内驱动处于期望控制模式。
+ */
+static inline void motor_api_write_csp_defaults(motor_api_handle_t *h, uint16_t axis_idx) {
+    MA_WR_S8(h, h->out[axis_idx].workModeOut, (int8_t)MA_MODE_CSP);
+    MA_WR_S8(h, h->out[axis_idx].interpolationCtrl, (int8_t)1);
+}
+
+/*
+ * motor_api_snapshot_fault_reset_cycles
+ * 功能: 读取 fault reset 请求计数的快照，避免在轴循环中反复加锁。
+ */
+static void motor_api_snapshot_fault_reset_cycles(motor_api_handle_t *h, uint8_t fr_cycles[MA_MAX_SLAVES]) {
+    memset(fr_cycles, 0, sizeof(uint8_t) * MA_MAX_SLAVES);
+    pthread_mutex_lock(&h->cmd_mutex);
+    memcpy(fr_cycles, h->fault_reset_cycles, sizeof(h->fault_reset_cycles));
+    pthread_mutex_unlock(&h->cmd_mutex);
+}
+
+/*
+ * motor_api_axis_apply_fault_reset
+ * 功能: 对单轴执行清错脉冲（先 0x0080，下一周期 0x0006）。
+ * 返回: true 表示本周期已处理清错并短路该轴后续控制；false 表示无需清错。
+ */
+static bool motor_api_axis_apply_fault_reset(motor_api_handle_t *h, uint16_t axis_idx, uint8_t fr_cycle) {
+    if (fr_cycle == 0) return false;
+    int32_t ap = MA_RD_S32(h, h->in[axis_idx].actualPosition);
+    h->csp_target[axis_idx] = ap;
+    MA_WR_S32(h, h->out[axis_idx].targetPosition, ap);
+    MA_WR_U16(h, h->out[axis_idx].controlWord, (fr_cycle == 2) ? 0x0080 : 0x0006);
+    motor_api_write_csp_defaults(h, axis_idx);
+    return true;
+}
+
+/*
+ * motor_api_axis_step_enable
+ * 功能: 未进入 servo_enabled 时，根据状态字推进 CiA-402 使能序列并写控制字。
+ */
+static void motor_api_axis_step_enable(motor_api_handle_t *h, uint16_t axis_idx, uint16_t status_i, int dbg_tick) {
+    uint16_t control_i = 0x06;
+    switch (status_i & 0x6F) {
+        case 0x00: control_i = 0x06; break;
+        case 0x40: control_i = 0x06; break;
+        case 0x21:
+            control_i = 0x07;
+            h->csp_target[axis_idx] = MA_RD_S32(h, h->in[axis_idx].actualPosition);
+            MA_WR_S32(h, h->out[axis_idx].targetPosition, h->csp_target[axis_idx]);
+            break;
+        case 0x23: control_i = 0x0F; break;
+        case 0x27:
+            control_i = 0x0F;
+            if (!h->servo_enabled[axis_idx]) {
+                h->servo_enabled[axis_idx] = true;
+                if (dbg_tick % 100 == 0) {
+                    int32_t ap = MA_RD_S32(h, h->in[axis_idx].actualPosition);
+                    printf("[ENABLED%d] sw:0x%04X act:%d\n", axis_idx, status_i, ap);
+                }
+            }
+            h->csp_warmup[axis_idx] = 10;
+            h->csp_target[axis_idx] = MA_RD_S32(h, h->in[axis_idx].actualPosition);
+            break;
+        default: control_i = 0x06; break;
+    }
+    if ((status_i & 0x0040) && !(status_i & 0x0001)) {
+        MA_WR_U16(h, h->out[axis_idx].controlWord, 0x0000);
+        MA_WR_U16(h, h->out[axis_idx].controlWord, 0x0080);
+    }
+    MA_WR_U16(h, h->out[axis_idx].controlWord, control_i);
+    motor_api_write_csp_defaults(h, axis_idx);
+    if (dbg_tick % 500 == 0) {
+        int ack = (status_i & 0x1000) ? 1 : 0;
+        int trg = (status_i & 0x0400) ? 1 : 0;
+        int32_t ap = MA_RD_S32(h, h->in[axis_idx].actualPosition);
+        printf("[EN%d] sw:0x%04X ctrl:0x%04X mode:%d ack12:%d trg10:%d act:%d\n",
+               axis_idx, status_i, control_i, MA_RD_S8(h, h->in[axis_idx].workModeIn), ack, trg, ap);
+    }
+}
+
+/*
+ * motor_api_axis_hold_before_motion
+ * 功能: 栅栏未触发时保位到实际位置，避免统一起动前发生漂移。
+ */
+static void motor_api_axis_hold_before_motion(motor_api_handle_t *h, uint16_t axis_idx, uint16_t status_i, int dbg_tick) {
+    h->csp_target[axis_idx] = MA_RD_S32(h, h->in[axis_idx].actualPosition);
+    MA_WR_S32(h, h->out[axis_idx].targetPosition, h->csp_target[axis_idx]);
+    MA_WR_U16(h, h->out[axis_idx].controlWord, 0x0F);
+    motor_api_write_csp_defaults(h, axis_idx);
+    h->last_actual_pos[axis_idx] = MA_RD_S32(h, h->in[axis_idx].actualPosition);
+    if (dbg_tick % 100 == 0) {
+        printf("[GATE%d] hold tgt:%d act:%d sw:0x%04X mode:%d\n", axis_idx,
+               MA_RD_S32(h, h->out[axis_idx].targetPosition),
+               h->last_actual_pos[axis_idx], status_i,
+               MA_RD_S8(h, h->in[axis_idx].workModeIn));
+    }
+}
+
+/*
+ * motor_api_axis_run_motion
+ * 功能: 栅栏触发后执行运动控制：读取指令、限幅、预热处理，并写入目标位置。
+ */
+static void motor_api_axis_run_motion(motor_api_handle_t *h, uint16_t axis_idx, uint16_t status_i, int dbg_tick) {
+    pthread_mutex_lock(&h->cmd_mutex);
+    bool run = h->axis_run[axis_idx] ? true : h->cmd_run;
+    int dir  = h->axis_run[axis_idx] ? h->axis_dir[axis_idx] : h->cmd_dir;
+    int step = h->axis_run[axis_idx] ? h->axis_step[axis_idx] : h->cmd_step;
+    pthread_mutex_unlock(&h->cmd_mutex);
+
+    int delta = run ? (dir * step) : 0;
+    if (delta > MA_MAX_DELTA_PER_CYCLE) delta = MA_MAX_DELTA_PER_CYCLE;
+    if (delta < -MA_MAX_DELTA_PER_CYCLE) delta = -MA_MAX_DELTA_PER_CYCLE;
+    
+    if (h->csp_warmup[axis_idx] > 0) { 
+        h->csp_target[axis_idx] = MA_RD_S32(h, h->in[axis_idx].actualPosition); 
+        h->csp_warmup[axis_idx]--; 
+    } else { 
+        h->csp_target[axis_idx] += delta; 
+    }
+    
+    if (run && (dbg_tick % 100 == 0)) {
+         printf("[DEBUG%d] run=%d dir=%d step=%d delta=%d warm=%d tgt=%d act=%d\n", 
+                axis_idx, run, dir, step, delta, h->csp_warmup[axis_idx], h->csp_target[axis_idx],
+                MA_RD_S32(h, h->in[axis_idx].actualPosition));
+    }
+
+    MA_WR_S32(h, h->out[axis_idx].targetPosition, h->csp_target[axis_idx]);
+    MA_WR_U16(h, h->out[axis_idx].controlWord, 0x0F);
+    motor_api_write_csp_defaults(h, axis_idx);
+    h->last_actual_pos[axis_idx] = MA_RD_S32(h, h->in[axis_idx].actualPosition);
+    if (dbg_tick % 500 == 0) {
+        printf("[RUN%d] tgt:%d act:%d sw:0x%04X mode:%d\n", axis_idx,
+               MA_RD_S32(h, h->out[axis_idx].targetPosition),
+               h->last_actual_pos[axis_idx], status_i,
+               MA_RD_S8(h, h->in[axis_idx].workModeIn));
+    }
+}
+
+/*
+ * motor_api_commit_fault_reset_cycles
+ * 功能: 周期末提交并递减 fault reset 计数（只对已请求的轴递减）。
+ */
+static void motor_api_commit_fault_reset_cycles(motor_api_handle_t *h, const uint8_t fr_cycles[MA_MAX_SLAVES]) {
+    pthread_mutex_lock(&h->cmd_mutex);
+    for (uint16_t i = 0; i < h->slave_count; ++i) {
+        if (fr_cycles[i] > 0) h->fault_reset_cycles[i] = (uint8_t)(fr_cycles[i] - 1);
+    }
+    pthread_mutex_unlock(&h->cmd_mutex);
+}
+
+/*
+ * motor_api_update_barrier
+ * 功能: 栅栏逻辑：全轴进入 enabled 后 ARM，延时到期后统一 FIRE 并标记 motion_started。
+ */
+static void motor_api_update_barrier(motor_api_handle_t *h) {
+    int all_enabled = 1;
+    for (uint16_t i = 0; i < h->slave_count; ++i) all_enabled = all_enabled && h->seen_enabled[i];
+    if (h->motion_started) return;
+
+    if (!h->barrier_armed && all_enabled) {
+        h->barrier_armed = 1;
+        h->barrier_start_ns = motor_api_monotonic_ns();
+        printf("[BARRIER_ARM] all at 0x027 (enabled), wait 1s\n");
+    }
+    if (!h->barrier_armed) return;
+
+    uint64_t now = motor_api_monotonic_ns();
+    if (now - h->barrier_start_ns < h->barrier_delay_ns) return;
+
+    for (uint16_t i = 0; i < h->slave_count; ++i) {
+        h->csp_target[i] = MA_RD_S32(h, h->in[i].actualPosition);
+        MA_WR_S32(h, h->out[i].targetPosition, h->csp_target[i]);
+        MA_WR_U16(h, h->out[i].controlWord, 0x0F);
+        MA_WR_S8(h, h->out[i].workModeOut, (int8_t)MA_MODE_CSP);
+    }
+    printf("[BARRIER_FIRE] synchronized motion start after 1s (enabled), slaves=%u\n", h->slave_count);
+    h->motion_started = 1;
+    h->barrier_armed = 0;
+}
+
+/*
+ * motor_api_cycle_begin
+ * 功能: 一次周期开始的 EtherCAT 收包与状态快照更新。
+ */
+static void motor_api_cycle_begin(motor_api_handle_t *h) {
+    ecrt_master_receive(h->master);
+    ecrt_domain_process(h->domain);
+    ecrt_master_sync_slave_clocks(h->master);
+    check_domain_state(h);
+    check_master_state(h);
+    check_slave_states(h);
+}
+
+/*
+ * motor_api_cycle_end
+ * 功能: 一次周期结束的数据提交与发送。
+ */
+static void motor_api_cycle_end(motor_api_handle_t *h) {
+    ecrt_domain_queue(h->domain);
+    ecrt_master_send(h->master);
+}
+
+/*
+ * motor_api_axis_process
+ * 功能: 单轴周期控制：更新状态、处理清错、推进使能或运动控制。
+ */
+static void motor_api_axis_process(motor_api_handle_t *h, uint16_t axis_idx, uint8_t fr_cycle, int dbg_tick) {
+    uint16_t status_i = MA_RD_U16(h, h->in[axis_idx].statusword);
+    h->seen_enabled[axis_idx] = (((status_i & 0x6F) == 0x27) ? true : false);
+
+    if (motor_api_axis_apply_fault_reset(h, axis_idx, fr_cycle)) return;
+
+    if (!h->servo_enabled[axis_idx]) {
+        motor_api_axis_step_enable(h, axis_idx, status_i, dbg_tick);
+        return;
+    }
+
+    h->time_cnt[axis_idx]++;
+    if (!h->motion_started) {
+        motor_api_axis_hold_before_motion(h, axis_idx, status_i, dbg_tick);
+    } else {
+        motor_api_axis_run_motion(h, axis_idx, status_i, dbg_tick);
+    }
+}
+
+/*
  * 函数: motor_api_run_once
  * 功能: 周期性控制入口，包含状态机推进、目标更新、同步栅栏与调试输出。
  * 注意: 需以固定周期调用（例如 4ms）。
@@ -574,160 +833,15 @@ EXTERNFUNC ma_status_t motor_api_format_diag_json(struct motor_api_handle *handl
 EXTERNFUNC ma_status_t motor_api_run_once(struct motor_api_handle *handle) {
     motor_api_handle_t *h = (motor_api_handle_t *)handle; if (!h) return MA_ERR_PARAM;
     ecrt_master_application_time(h->master, motor_api_monotonic_ns());
-    for (uint16_t i = 0; i < h->slave_count; ++i) {
-        MA_WR_S8(h, h->out[i].workModeOut, (int8_t)MA_MODE_CSP);
-        MA_WR_S8(h, h->out[i].interpolationCtrl, (int8_t)1);
-    }
-    ecrt_master_receive(h->master);
-    ecrt_domain_process(h->domain);
-    ecrt_master_sync_slave_clocks(h->master);
-    check_domain_state(h);
-    check_master_state(h);
-    check_slave_states(h);
+    motor_api_cycle_begin(h);
     static int dbg_tick = 0; dbg_tick++;
-    /* 逐轴推进状态机与写入控制字/模式 */
+    uint8_t fr_cycles[MA_MAX_SLAVES];
+    motor_api_snapshot_fault_reset_cycles(h, fr_cycles);
     for (uint16_t i = 0; i < h->slave_count; ++i) {
-        MA_WR_S8(h, h->out[i].workModeOut, (int8_t)MA_MODE_CSP);
-        MA_WR_S8(h, h->out[i].interpolationCtrl, (int8_t)1);
-        uint16_t status_i = MA_RD_U16(h, h->in[i].statusword);
-        if ((status_i & 0x6F) == 0x27) h->seen_enabled[i] = true; else h->seen_enabled[i] = false;
-        uint16_t control_i = 0x06;
-        if (!h->servo_enabled[i]) {
-            /* 依据 CiA-402 标准用状态字低位掩码推进控制字序列 */
-            switch (status_i & 0x6F) {
-                case 0x00: control_i = 0x06; break;
-                case 0x40: control_i = 0x06; break;
-                case 0x21:
-                    control_i = 0x07;
-                    h->csp_target[i] = MA_RD_S32(h, h->in[i].actualPosition);
-                    MA_WR_S32(h, h->out[i].targetPosition, h->csp_target[i]);
-                    break;
-                case 0x23: control_i = 0x0F; break;
-                case 0x27:
-                    control_i = 0x0F;
-                    if (!h->servo_enabled[i]) {
-                        h->servo_enabled[i] = true;
-                        if (dbg_tick % 100 == 0) {
-                            int32_t ap = MA_RD_S32(h, h->in[i].actualPosition);
-                            printf("[ENABLED%d] sw:0x%04X act:%d\n", i, status_i, ap);
-                        }
-                    }
-                    h->csp_warmup[i] = 10;
-                    h->csp_target[i] = MA_RD_S32(h, h->in[i].actualPosition);
-                    break;
-                default: control_i = 0x06; break;
-            }
-            /* 检测故障位并执行快速复位（0x0080） */
-            if ((status_i & 0x0040) && !(status_i & 0x0001)) {
-                MA_WR_U16(h, h->out[i].controlWord, 0x0000);
-                MA_WR_U16(h, h->out[i].controlWord, 0x0080);
-            }
-            MA_WR_U16(h, h->out[i].controlWord, control_i);
-            MA_WR_S8(h, h->out[i].workModeOut, (int8_t)MA_MODE_CSP);
-            MA_WR_S8(h, h->out[i].interpolationCtrl, (int8_t)1);
-            if (dbg_tick % 500 == 0) {
-                int ack = (status_i & 0x1000) ? 1 : 0;
-                int trg = (status_i & 0x0400) ? 1 : 0;
-                int32_t ap = MA_RD_S32(h, h->in[i].actualPosition);
-                printf("[EN%d] sw:0x%04X ctrl:0x%04X mode:%d ack12:%d trg10:%d act:%d\n", i, status_i, control_i, MA_RD_S8(h, h->in[i].workModeIn), ack, trg, ap);
-            }
-        } else {
-            h->time_cnt[i]++;
-            /* 延迟栅栏未触发：保位到实际位置，写 0x0F 与模式 */
-            if (!h->motion_started) {
-                h->csp_target[i] = MA_RD_S32(h, h->in[i].actualPosition);
-                MA_WR_S32(h, h->out[i].targetPosition, h->csp_target[i]);
-                MA_WR_U16(h, h->out[i].controlWord, 0x0F);
-                MA_WR_S8(h, h->out[i].workModeOut, (int8_t)MA_MODE_CSP);
-                MA_WR_S8(h, h->out[i].interpolationCtrl, (int8_t)1);
-                h->last_actual_pos[i] = MA_RD_S32(h, h->in[i].actualPosition);
-                if (dbg_tick % 100 == 0) {
-                    printf("[GATE%d] hold tgt:%d act:%d sw:0x%04X mode:%d\n", i,
-                           MA_RD_S32(h, h->out[i].targetPosition),
-                           h->last_actual_pos[i], status_i,
-                           MA_RD_S8(h, h->in[i].workModeIn));
-                }
-            } else {
-                /* 延迟栅栏已触发：按命令增量推进目标（限幅与预热） */
-                pthread_mutex_lock(&h->cmd_mutex);
-                /* 优先使用单轴指令，如果单轴指令有效（run=true），则覆盖全局指令；否则叠加或仅用全局 */
-                /* 策略：如果单轴 run=true，则使用单轴参数；否则使用全局参数 */
-                bool run = h->axis_run[i] ? true : h->cmd_run;
-                int dir  = h->axis_run[i] ? h->axis_dir[i] : h->cmd_dir;
-                int step = h->axis_run[i] ? h->axis_step[i] : h->cmd_step;
-                pthread_mutex_unlock(&h->cmd_mutex);
-
-                int delta = run ? (dir * step) : 0;
-                if (delta > MA_MAX_DELTA_PER_CYCLE) delta = MA_MAX_DELTA_PER_CYCLE;
-                if (delta < -MA_MAX_DELTA_PER_CYCLE) delta = -MA_MAX_DELTA_PER_CYCLE;
-                
-                /* HCFA 从站 1-3 特殊处理：如果状态机刚进入 enabled 且尚未收到运动指令，保持当前位置 */
-                /* 已经在 csp_warmup 处理了初始跳变，这里主要确保 delta 能够正确作用 */
-                
-                if (h->csp_warmup[i] > 0) { 
-                    h->csp_target[i] = MA_RD_S32(h, h->in[i].actualPosition); 
-                    h->csp_warmup[i]--; 
-                } else { 
-                    h->csp_target[i] += delta; 
-                }
-                
-                /* 调试：当有运动指令时，打印 delta 和 target，帮助排查为何不转动 */
-                if (run && (dbg_tick % 100 == 0)) {
-                     printf("[DEBUG%d] run=%d dir=%d step=%d delta=%d warm=%d tgt=%d act=%d\n", 
-                            i, run, dir, step, delta, h->csp_warmup[i], h->csp_target[i], MA_RD_S32(h, h->in[i].actualPosition));
-                }
-
-                MA_WR_S32(h, h->out[i].targetPosition, h->csp_target[i]);
-                MA_WR_U16(h, h->out[i].controlWord, 0x0F);
-                MA_WR_S8(h, h->out[i].workModeOut, (int8_t)MA_MODE_CSP);
-                MA_WR_S8(h, h->out[i].interpolationCtrl, (int8_t)1);
-                h->last_actual_pos[i] = MA_RD_S32(h, h->in[i].actualPosition);
-                if (dbg_tick % 500 == 0) {
-                    printf("[RUN%d] tgt:%d act:%d sw:0x%04X mode:%d\n", i,
-                           MA_RD_S32(h, h->out[i].targetPosition),
-                           h->last_actual_pos[i], status_i,
-                           MA_RD_S8(h, h->in[i].workModeIn));
-                }
-            }
-        }
+        motor_api_axis_process(h, i, fr_cycles[i], dbg_tick);
     }
-    {
-        /* 栅栏逻辑：检测全轴使能后武装，延时 1s 后统一开始运动 */
-        pthread_mutex_lock(&h->cmd_mutex); 
-        bool run = h->cmd_run;
-        /* 只要有任意一个轴单独运行，或者全局运行，都触发栅栏逻辑 */
-        for(uint16_t i=0; i<h->slave_count; ++i) if(h->axis_run[i]) run = true;
-        pthread_mutex_unlock(&h->cmd_mutex);
-        
-        /* 消除未使用变量警告 */
-        (void)run;
-
-        int all_enabled = 1; for (uint16_t i = 0; i < h->slave_count; ++i) all_enabled = all_enabled && h->seen_enabled[i];
-        if (!h->motion_started) {
-             /* 即使没有全局 run，只要 all_enabled 就允许进入 armed 状态，以便单轴控制随时启动 */
-             /* 修改逻辑：只要全轴使能，就自动 ARM 并 FIRE，不再等待 run 指令 */
-             /* 这样可以解除 "必须先发 run 才能动" 的限制，单轴控制可以直接生效 */
-            if (!h->barrier_armed && all_enabled) {
-                h->barrier_armed = 1; h->barrier_start_ns = motor_api_monotonic_ns();
-                printf("[BARRIER_ARM] all at 0x027 (enabled), wait 1s\n");
-            }
-            if (h->barrier_armed) {
-                uint64_t now = motor_api_monotonic_ns();
-                if (now - h->barrier_start_ns >= h->barrier_delay_ns) {
-                    for (uint16_t i = 0; i < h->slave_count; ++i) {
-                        h->csp_target[i] = MA_RD_S32(h, h->in[i].actualPosition);
-                        MA_WR_S32(h, h->out[i].targetPosition, h->csp_target[i]);
-                        MA_WR_U16(h, h->out[i].controlWord, 0x0F);
-                        MA_WR_S8(h, h->out[i].workModeOut, (int8_t)MA_MODE_CSP);
-                    }
-                    printf("[BARRIER_FIRE] synchronized motion start after 1s (enabled), slaves=%u\n", h->slave_count);
-                    h->motion_started = 1; h->barrier_armed = 0;
-                }
-            }
-        }
-    }
-    /* 提交域数据并发送到主站 */
-    ecrt_domain_queue(h->domain);
-    ecrt_master_send(h->master);
+    motor_api_commit_fault_reset_cycles(h, fr_cycles);
+    motor_api_update_barrier(h);
+    motor_api_cycle_end(h);
     return MA_OK;
 }

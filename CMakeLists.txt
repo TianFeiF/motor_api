@@ -37,6 +37,9 @@ target_link_libraries(test_read motor_api_static ethercat pthread)
 add_executable(test_eth_initdll examples/test_eth_initdll.c)
 target_link_libraries(test_eth_initdll motor_api_static ethercat pthread)
 
+add_executable(test_main test/test_main.c)
+target_link_libraries(test_main motor_api_static ethercat pthread)
+
 install(TARGETS motor_api_static motor_api_shared example_csp test_read test_eth_initdll
         RUNTIME DESTINATION bin
         LIBRARY DESTINATION lib

@@ -115,6 +115,8 @@ typedef struct motor_api_handle {
     uint64_t barrier_start_ns;
     uint64_t barrier_delay_ns;
     int motion_started;
+
+    uint8_t fault_reset_cycles[MA_MAX_SLAVES];
 } motor_api_handle_t;
 
 /*

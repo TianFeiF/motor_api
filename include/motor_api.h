@@ -93,6 +93,8 @@ EXTERNFUNC ma_status_t motor_api_format_diag_json(struct motor_api_handle *handl
                                                   char *buf,
                                                   size_t buf_size);
 
+EXTERNFUNC ma_status_t motor_api_clear_error(struct motor_api_handle *handle, int axis_idx);
+
 EXTERNFUNC ma_status_t eth_initDLL(uint32_t timeout_ms,
                                    uint16_t *out_slave_count,
                                    char (*out_product_names)[64],
