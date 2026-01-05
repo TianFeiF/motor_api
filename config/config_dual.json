@@ -1,0 +1,23 @@
+{
+  "network": {
+    "eni_path": "../doc/HCFAX3E.xml",
+    "cycle_us": 4000
+  },
+  "slaves": [
+    {
+      "id": 0,
+      "type": "dual_axis",
+      "axes": [
+        { "axis_id": 0, "offset": 0, "encoder_res": 131072, "gear_ratio": 10.0, "unit_per_rev": 360.0 },
+        { "axis_id": 1, "offset": 2048, "encoder_res": 131072, "gear_ratio": 10.0, "unit_per_rev": 360.0 }
+      ]
+    },
+    {
+      "id": 1,
+      "type": "single_axis",
+      "axes": [
+        { "axis_id": 2, "offset": 0, "encoder_res": 131072, "gear_ratio": 1.0, "unit_per_rev": 360.0 }
+      ]
+    }
+  ]
+}

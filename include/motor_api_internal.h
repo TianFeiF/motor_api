@@ -22,14 +22,8 @@
 #include "ecrt.h"
 
 /*
- * MA_MAX_SLAVES
- * 库内部支持的最大从站数量上限（静态数组容量）。
- */
-#define MA_MAX_SLAVES 16
-
-/*
  * ma_output_offsets_t
- * 每个从站的“输出方向(Rx)”PDO entry 在 domain 数据区中的偏移（单位：字节）。
+ * 每个逻辑轴的“输出方向(Rx)”PDO entry 在 domain 数据区中的偏移（单位：字节）。
  * 说明：ecrt_domain_reg_pdo_entry_list 注册后，offset 会被填充为具体偏移；
  *      运行周期中通过偏移快速写入，避免字符串查表/重复注册开销。
  */
@@ -43,7 +37,7 @@ typedef struct {
 
 /*
  * ma_input_offsets_t
- * 每个从站的“输入方向(Tx)”PDO entry 在 domain 数据区中的偏移（单位：字节）。
+ * 每个逻辑轴的“输入方向(Tx)”PDO entry 在 domain 数据区中的偏移（单位：字节）。
  * 同 ma_output_offsets_t，用于周期中快速读取。
  */
 typedef struct {
@@ -62,13 +56,26 @@ typedef struct {
 } ma_input_offsets_t;
 
 /*
+ * ma_axis_map_t
+ * 描述一个逻辑轴与物理从站及对象字典基地址的映射关系。
+ */
+typedef struct {
+    bool active;
+    uint16_t slave_idx;     // 归属的物理从站索引
+    ma_axis_type_t type;    // 轴类型（CiA402 / IO）
+    uint16_t base_offset;   // 对象字典基地址偏移（如 0x6000 或 0x6800）
+    double scale_pos;       // 位置比例因子（用户单位 -> 脉冲）
+    double scale_vel;       // 速度比例因子
+} ma_axis_map_t;
+
+/*
  * motor_api_handle_t
  * 库内部句柄（对外通过 struct motor_api_handle 不透明指针暴露）。
  *
  * 字段分组说明：
  * - EtherCAT 资源：master/domain/sc[] 及其状态快照；
  * - 配置信息：从站数量、VID/PID/Position、周期与 DC 参数；
- * - PDO 偏移：out[]/in[]；
+ * - 轴映射：axis_map[] / out[] / in[]；
  * - 网络线程：http_thread/http_port/stop；
  * - 指令与状态：互斥保护的全局/单轴命令，以及状态机/调试用缓存。
  */
@@ -86,38 +93,60 @@ typedef struct motor_api_handle {
     uint32_t product_code[MA_MAX_SLAVES];
     uint16_t position[MA_MAX_SLAVES];
 
+    uint16_t axis_count;
+    ma_axis_map_t axis_map[MA_MAX_AXES];
+    ma_output_offsets_t out[MA_MAX_AXES];
+    ma_input_offsets_t in[MA_MAX_AXES];
+    
+    /* 运行状态 */
+    bool servo_enabled[MA_MAX_AXES];
+    bool motion_started;
+    
+    /* 调试/指令缓存 */
+    bool cmd_run;
+    int cmd_dir;
+    int cmd_step;
+    
+    bool axis_run[MA_MAX_AXES];
+    int axis_dir[MA_MAX_AXES];
+    int axis_step[MA_MAX_AXES];
+
+    /* 互斥锁 */
+    pthread_mutex_t cmd_mutex;
+
+    /* 内部状态机缓存 */
+    int32_t last_actual_pos[MA_MAX_AXES];
+    uint32_t time_cnt[MA_MAX_AXES];
+    int32_t csp_target[MA_MAX_AXES];
+    int csp_warmup[MA_MAX_AXES];
+    
+    /* 故障复位处理 */
+    uint8_t fault_reset_cycles[MA_MAX_AXES];
+
+    /* 栅栏同步 */
+    int barrier_armed;
+    uint64_t barrier_start_ns;
+    uint64_t barrier_delay_ns;
+
+    /* DC 参数 */
     uint32_t cycle_us;
     uint64_t dc_sync0_period_ns;
-
-    ma_output_offsets_t out[MA_MAX_SLAVES];
-    ma_input_offsets_t in[MA_MAX_SLAVES];
-
+    
     pthread_t http_thread;
     int http_port;
     volatile sig_atomic_t stop;
 
-    pthread_mutex_t cmd_mutex;
-    bool cmd_run;
-    int cmd_dir;
-    int cmd_step;
-
-    bool axis_run[MA_MAX_SLAVES];
-    int axis_dir[MA_MAX_SLAVES];
-    int axis_step[MA_MAX_SLAVES];
-
-    int32_t last_actual_pos[MA_MAX_SLAVES];
-    uint32_t time_cnt[MA_MAX_SLAVES];
-    bool servo_enabled[MA_MAX_SLAVES];
-    int csp_warmup[MA_MAX_SLAVES];
-    int32_t csp_target[MA_MAX_SLAVES];
-    bool seen_enabled[MA_MAX_SLAVES];
-    int barrier_armed;
-    uint64_t barrier_start_ns;
-    uint64_t barrier_delay_ns;
-    int motion_started;
-
-    uint8_t fault_reset_cycles[MA_MAX_SLAVES];
+    /* 诊断快照 */
+    bool seen_enabled[MA_MAX_AXES];
 } motor_api_handle_t;
+
+/* 内部基础创建函数，支持轴映射覆盖 */
+ma_status_t motor_api_create_base(const char *eni_path,
+                                  uint32_t cycle_us,
+                                  uint16_t *out_slave_count,
+                                  struct motor_api_handle **out_handle,
+                                  const ma_axis_map_t *axis_override,
+                                  int axis_override_count);
 
 /*
  * MA_RD_* / MA_WR_*

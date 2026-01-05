@@ -27,6 +27,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -109,10 +110,14 @@ static void http_send(int fd, const char *status, const char *ctype, const char 
  */
 static int parse_control_json(const char *body, int *out_dir, int *out_step) {
     if (!body || !out_dir || !out_step) return -1;
-    const char *dkey = strstr(body, "\"direction\""); if (!dkey) return -2;
-    const char *dcolon = strchr(dkey, ':'); if (!dcolon) return -3;
-    const char *dquote1 = strchr(dcolon, '"'); if (!dquote1) return -4;
-    const char *dquote2 = strchr(dquote1 + 1, '"'); if (!dquote2) return -5;
+    const char *dkey = strstr(body, "\"direction\"");
+    if (!dkey) return -2;
+    const char *dcolon = strchr(dkey, ':');
+    if (!dcolon) return -3;
+    const char *dquote1 = strchr(dcolon, '"');
+    if (!dquote1) return -4;
+    const char *dquote2 = strchr(dquote1 + 1, '"');
+    if (!dquote2) return -5;
     int dir = 0;
     size_t dlen = (size_t)(dquote2 - (dquote1 + 1));
     if (dlen > 32) return -6;
@@ -123,9 +128,12 @@ static int parse_control_json(const char *body, int *out_dir, int *out_step) {
     if (strcmp(dval, "forward") == 0) dir = 1;
     else if (strcmp(dval, "reverse") == 0) dir = -1;
     else return -7;
-    const char *skey = strstr(body, "\"step\""); if (!skey) return -8;
-    const char *scolon = strchr(skey, ':'); if (!scolon) return -9;
-    long step = strtol(scolon + 1, NULL, 10); if (step <= 0 || step > 100000000) return -10;
+    const char *skey = strstr(body, "\"step\"");
+    if (!skey) return -8;
+    const char *scolon = strchr(skey, ':');
+    if (!scolon) return -9;
+    long step = strtol(scolon + 1, NULL, 10);
+    if (step <= 0 || step > 100000000) return -10;
     *out_dir = dir;
     *out_step = (int)step;
     return 0;
@@ -141,7 +149,9 @@ static int parse_control_json(const char *body, int *out_dir, int *out_step) {
  */
 static int parse_axis_control_json(const char *json, int *axis, int *dir, int *step) {
     if (!json || !axis || !dir || !step) return -1;
-    *axis = -1; *dir = 0; *step = 0;
+    *axis = -1;
+    *dir = 0;
+    *step = 0;
 
     const char *p = strstr(json, "\"axis\"");
     if (p) {
@@ -197,6 +207,20 @@ static void *http_thread_fn(void *arg) {
         return NULL;
     }
     while (!h->stop) {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(sfd, &rfds);
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 200000;
+        int sel = select(sfd + 1, &rfds, NULL, NULL, &tv);
+        if (sel <= 0) {
+            if (sel < 0 && errno != EINTR) {
+                break;
+            }
+            continue;
+        }
+
         struct sockaddr_in cli;
         socklen_t cl = sizeof(cli);
         int cfd = accept(sfd, (struct sockaddr *)&cli, &cl);
@@ -358,7 +382,9 @@ ma_status_t motor_api_stop_http(struct motor_api_handle *handle) {
     motor_api_handle_t *h = (motor_api_handle_t *)handle;
     if (!h) return MA_ERR_PARAM;
     h->stop = 1;
-    if (h->http_thread) pthread_join(h->http_thread, NULL);
+    if (h->http_thread) {
+        pthread_join(h->http_thread, NULL);
+    }
     return MA_OK;
 }
 
@@ -378,13 +404,13 @@ ma_status_t motor_api_set_command(struct motor_api_handle *handle, bool run, int
  * motor_api_set_axis_command
  * 功能：设置单轴独立运行命令（线程安全）。
  * 说明：
- * - axis_idx 为 0-based 索引，范围 [0, slave_count)；
+ * - axis_idx 为 0-based 索引，范围 [0, axis_count)；
  * - 若某轴 axis_run=true，则周期控制中优先使用该轴的 dir/step；
  */
 ma_status_t motor_api_set_axis_command(struct motor_api_handle *handle, int axis_idx, bool run, int dir, int step) {
     motor_api_handle_t *h = (motor_api_handle_t *)handle;
     if (!h) return MA_ERR_PARAM;
-    if (axis_idx < 0 || axis_idx >= h->slave_count) return MA_ERR_PARAM;
+    if (axis_idx < 0 || axis_idx >= (int)h->axis_count) return MA_ERR_PARAM;
     if (step < 1) step = 1;
     if (step > 100000) step = 100000;
     if (dir != -1 && dir != 0 && dir != 1) dir = 0;

@@ -267,10 +267,12 @@ static void check_slave_states(motor_api_handle_t *h) {
  * 函数: motor_api_create
  * 功能: 创建主站与域、注册 PDO、配置 DC，同步周期与 ENI。
  */
-EXTERNFUNC ma_status_t motor_api_create(const char *eni_path,
+ma_status_t motor_api_create_base(const char *eni_path,
                                         uint32_t cycle_us,
                                         uint16_t *out_slave_count,
-                                        struct motor_api_handle **out_handle) {
+                                        struct motor_api_handle **out_handle,
+                                        const ma_axis_map_t *axis_override,
+                                        int axis_override_count) {
     if (!out_handle || cycle_us == 0) return MA_ERR_PARAM;
     motor_api_handle_t *h = (motor_api_handle_t *)calloc(1, sizeof(*h)); if (!h) return MA_ERR_RUNTIME;
     h->cycle_us = cycle_us; h->dc_sync0_period_ns = (uint64_t)cycle_us * 1000ULL;
@@ -291,8 +293,8 @@ EXTERNFUNC ma_status_t motor_api_create(const char *eni_path,
         cnt = 3; vids[0] = vids[1] = vids[2] = 0x000116c7; prods[0] = prods[1] = prods[2] = 0x003e0402; poss[0] = 0; poss[1] = 1; poss[2] = 2;
         printf("[WARN] No ENI provided, using default 3 slaves\n");
     }
-    h->slave_count = cnt; for (uint16_t i=0;i<cnt;i++){ h->vendor_id[i]=vids[i]; h->product_code[i]=prods[i]; h->position[i]=poss[i]; }
-    for (uint16_t i = 0; i < cnt; ++i) {
+    // 初始化 out/in 数组的所有字段为 UINT_MAX
+    for (int i = 0; i < MA_MAX_AXES; ++i) {
         h->out[i].controlWord = UINT_MAX;
         h->out[i].workModeOut = UINT_MAX;
         h->out[i].targetPosition = UINT_MAX;
@@ -312,9 +314,27 @@ EXTERNFUNC ma_status_t motor_api_create(const char *eni_path,
         h->in[i].brakeDelay = UINT_MAX;
     }
 
+    /* 轴配置逻辑：优先使用 Override，否则自动发现 */
+    bool use_override = (axis_override && axis_override_count > 0);
+    h->axis_count = 0;
+    if (use_override) {
+        printf("[INFO] Using manual axis configuration (count=%d)\n", axis_override_count);
+        for (int k = 0; k < axis_override_count; k++) {
+            if (h->axis_count >= MA_MAX_AXES) break;
+            h->axis_map[h->axis_count] = axis_override[k];
+            h->axis_count++;
+        }
+    }
+
+    /* 遍历从站，初始化 SC 并（可选）进行轴发现 */
     for (uint16_t i = 0; i < cnt; ++i) {
+        h->vendor_id[i] = vids[i];
+        h->product_code[i] = prods[i];
+        h->position[i] = poss[i];
+
         h->sc[i] = ecrt_master_slave_config(h->master, 0, poss[i], vids[i], prods[i]);
         if (!h->sc[i]) { if (eni_slaves) motor_api_free_eni_slaves(eni_slaves, cnt); ecrt_release_master(h->master); free(h); return MA_ERR_INIT; }
+        
         uint8_t period_ms = (uint8_t)(cycle_us / 1000U);
         if (vids[i] == 0x000116C7) {
             (void)ecrt_slave_config_sdo8(h->sc[i], 0x60C2, 2, (uint8_t)-3);
@@ -327,7 +347,73 @@ EXTERNFUNC ma_status_t motor_api_create(const char *eni_path,
             (void)ecrt_slave_config_sdo8(h->sc[i], 0x60C2, 1, 1);
             (void)ecrt_slave_config_sdo8(h->sc[i], 0x6060, 0, (uint8_t)MA_MODE_CSP);
         }
+
+        if (!use_override) {
+            const ma_eni_slave_t *s = eni_slaves ? &eni_slaves[i] : NULL;
+        if (!s) {
+            // 无 ENI 信息，默认为单轴 CiA402，偏移 0x0000
+            if (h->axis_count < MA_MAX_AXES) {
+                ma_axis_map_t *ax = &h->axis_map[h->axis_count];
+                ax->active = true;
+                ax->slave_idx = i;
+                ax->type = MA_AXIS_TYPE_CIA402;
+                ax->base_offset = 0x0000;
+                ax->scale_pos = 1.0;
+                ax->scale_vel = 1.0;
+                h->axis_count++;
+            }
+        } else {
+            // 扫描 ENI，探测轴
+            // 规则 1：检查标准 CiA402 (0x6040)
+            if (motor_api_eni_has_rx_entry(s, 0x6040, 0)) {
+                if (h->axis_count < MA_MAX_AXES) {
+                    ma_axis_map_t *ax = &h->axis_map[h->axis_count];
+                    ax->active = true;
+                    ax->slave_idx = i;
+                    ax->type = MA_AXIS_TYPE_CIA402;
+                    ax->base_offset = 0x0000; // 基址偏移 0
+                    ax->scale_pos = 1.0;
+                    ax->scale_vel = 1.0;
+                    h->axis_count++;
+                }
+            }
+            // 规则 2：检查 Hans Robot 风格第二轴 (0x6840)
+            if (motor_api_eni_has_rx_entry(s, 0x6840, 0)) {
+                if (h->axis_count < MA_MAX_AXES) {
+                    ma_axis_map_t *ax = &h->axis_map[h->axis_count];
+                    ax->active = true;
+                    ax->slave_idx = i;
+                    ax->type = MA_AXIS_TYPE_CIA402;
+                    ax->base_offset = 0x0800; // 基址偏移 0x800 (6840 - 6040)
+                    ax->scale_pos = 1.0;
+                    ax->scale_vel = 1.0;
+                    h->axis_count++;
+                }
+            }
+            // 规则 3：如果既没有 0x6040 也没有 0x6840，但有 IO (如 0x70xx/0x60xx IO port)，可以作为 IO 轴
+            if (!motor_api_eni_has_rx_entry(s, 0x6040, 0) && !motor_api_eni_has_rx_entry(s, 0x6840, 0)) {
+                 // 简单探测：若有 0x7000 (Output) 或 0x6000 (Input)
+                 bool has_io_out = motor_api_eni_has_rx_entry(s, 0x7000, 1) || motor_api_eni_has_rx_entry(s, 0x7010, 1);
+                 bool has_io_in  = motor_api_eni_has_tx_entry(s, 0x6000, 1) || motor_api_eni_has_tx_entry(s, 0x6010, 1);
+                 
+                 if (has_io_out || has_io_in) {
+                    if (h->axis_count < MA_MAX_AXES) {
+                        ma_axis_map_t *ax = &h->axis_map[h->axis_count];
+                        ax->active = true;
+                        ax->slave_idx = i;
+                        ax->type = MA_AXIS_TYPE_IO;
+                        ax->base_offset = 0x0000;
+                        ax->scale_pos = 1.0;
+                        ax->scale_vel = 1.0;
+                        h->axis_count++;
+                        printf("[INFO] Slave %u detected as IO device\n", i);
+                    }
+                 }
+            }
+        }
+        }
     }
+    if (!use_override) printf("[INFO] Auto-detected axes count: %u\n", h->axis_count);
 
     if (eni_slaves) {
         for (uint16_t i = 0; i < cnt; ++i) {
@@ -406,31 +492,55 @@ EXTERNFUNC ma_status_t motor_api_create(const char *eni_path,
         }
     }
 
-    ec_pdo_entry_reg_t regs[MA_MAX_SLAVES * 24 + 1]; memset(regs, 0, sizeof(regs)); size_t r = 0;
-    for (uint16_t i = 0; i < cnt; ++i) {
+    ec_pdo_entry_reg_t regs[MA_MAX_AXES * 24 + 1]; memset(regs, 0, sizeof(regs)); size_t r = 0;
+    for (uint16_t j = 0; j < h->axis_count; ++j) {
+        ma_axis_map_t *ax = &h->axis_map[j];
+        uint16_t i = ax->slave_idx;
+        uint16_t base = ax->base_offset;
         const ma_eni_slave_t *s = eni_slaves ? &eni_slaves[i] : NULL;
-        if (!s || motor_api_eni_has_rx_entry(s, 0x6040, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x6040, .subindex = 0x00, .offset = &h->out[i].controlWord };
-        if (!s || motor_api_eni_has_rx_entry(s, 0x6060, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x6060, .subindex = 0x00, .offset = &h->out[i].workModeOut };
-        if (!s || motor_api_eni_has_rx_entry(s, 0x607A, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x607A, .subindex = 0x00, .offset = &h->out[i].targetPosition };
-        if (!s || motor_api_eni_has_rx_entry(s, 0x60B8, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x60B8, .subindex = 0x00, .offset = &h->out[i].touchProbeFunc };
-        if (!s || motor_api_eni_has_rx_entry(s, 0x60C2, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x60C2, .subindex = 0x00, .offset = &h->out[i].interpolationCtrl };
-        if (!s || motor_api_eni_has_tx_entry(s, 0x6041, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x6041, .subindex = 0x00, .offset = &h->in[i].statusword };
-        if (!s || motor_api_eni_has_tx_entry(s, 0x6064, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x6064, .subindex = 0x00, .offset = &h->in[i].actualPosition };
-        if (!s || motor_api_eni_has_tx_entry(s, 0x606C, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x606C, .subindex = 0x00, .offset = &h->in[i].actualVelocity };
-        if (!s || motor_api_eni_has_tx_entry(s, 0x6077, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x6077, .subindex = 0x00, .offset = &h->in[i].actualTorque };
-        if (!s || motor_api_eni_has_tx_entry(s, 0x6061, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x6061, .subindex = 0x00, .offset = &h->in[i].workModeIn };
-        if (!s || motor_api_eni_has_tx_entry(s, 0x603F, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x603F, .subindex = 0x00, .offset = &h->in[i].errorCode };
-        if (!s || motor_api_eni_has_tx_entry(s, 0x60F4, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x60F4, .subindex = 0x00, .offset = &h->in[i].followingError };
-        if (!s || motor_api_eni_has_tx_entry(s, 0x60FD, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x60FD, .subindex = 0x00, .offset = &h->in[i].digitalInputs };
-        if (!s || motor_api_eni_has_tx_entry(s, 0x60B9, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x60B9, .subindex = 0x00, .offset = &h->in[i].touchProbeStatus };
-        if (!s || motor_api_eni_has_tx_entry(s, 0x60BA, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x60BA, .subindex = 0x00, .offset = &h->in[i].touchProbePos };
-        if (!s || motor_api_eni_has_tx_entry(s, 0x213F, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x213F, .subindex = 0x00, .offset = &h->in[i].servoErrorCode };
-        if (!s || motor_api_eni_has_tx_entry(s, 0x2026, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x2026, .subindex = 0x00, .offset = &h->in[i].brakeDelay };
-    }
-    regs[r] = (ec_pdo_entry_reg_t){0};
-    if (ecrt_domain_reg_pdo_entry_list(h->domain, regs)) { if (eni_slaves) motor_api_free_eni_slaves(eni_slaves, cnt); ecrt_release_master(h->master); free(h); return MA_ERR_CONFIG; }
 
-    /* DC 配置：选 0 号从站为参考时钟，统一 Sync0 周期 */
+        if (ax->type == MA_AXIS_TYPE_IO) {
+            // IO 设备映射：Input -> digitalInputs(0x60FD), Output -> digitalOutputs (reuse controlWord?)
+            // 暂时只映射 Input 到 digitalInputs (0x60FD local storage), Output 到 controlWord (0x6040 local storage)
+            // 注意：这里需要根据实际 IO 模块的对象字典调整。
+            // 假设 Input 在 0x6000:01, Output 在 0x7000:01
+            if (!s || motor_api_eni_has_tx_entry(s, 0x6000, 1)) 
+                regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x6000, .subindex = 0x01, .offset = &h->in[j].digitalInputs };
+            if (!s || motor_api_eni_has_rx_entry(s, 0x7000, 1))
+                regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x7000, .subindex = 0x01, .offset = &h->out[j].controlWord }; // 借用 controlWord
+            continue;
+        }
+
+        // CiA402 轴映射
+        if (!s || motor_api_eni_has_rx_entry(s, 0x6040 + base, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x6040 + base, .subindex = 0x00, .offset = &h->out[j].controlWord };
+        if (!s || motor_api_eni_has_rx_entry(s, 0x6060 + base, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x6060 + base, .subindex = 0x00, .offset = &h->out[j].workModeOut };
+        if (!s || motor_api_eni_has_rx_entry(s, 0x607A + base, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x607A + base, .subindex = 0x00, .offset = &h->out[j].targetPosition };
+        if (!s || motor_api_eni_has_rx_entry(s, 0x60B8 + base, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x60B8 + base, .subindex = 0x00, .offset = &h->out[j].touchProbeFunc };
+        if (!s || motor_api_eni_has_rx_entry(s, 0x60C2 + base, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x60C2 + base, .subindex = 0x00, .offset = &h->out[j].interpolationCtrl };
+        
+        if (!s || motor_api_eni_has_tx_entry(s, 0x6041 + base, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x6041 + base, .subindex = 0x00, .offset = &h->in[j].statusword };
+        if (!s || motor_api_eni_has_tx_entry(s, 0x6064 + base, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x6064 + base, .subindex = 0x00, .offset = &h->in[j].actualPosition };
+        if (!s || motor_api_eni_has_tx_entry(s, 0x606C + base, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x606C + base, .subindex = 0x00, .offset = &h->in[j].actualVelocity };
+        if (!s || motor_api_eni_has_tx_entry(s, 0x6077 + base, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x6077 + base, .subindex = 0x00, .offset = &h->in[j].actualTorque };
+        if (!s || motor_api_eni_has_tx_entry(s, 0x6061 + base, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x6061 + base, .subindex = 0x00, .offset = &h->in[j].workModeIn };
+        if (!s || motor_api_eni_has_tx_entry(s, 0x603F + base, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x603F + base, .subindex = 0x00, .offset = &h->in[j].errorCode };
+        if (!s || motor_api_eni_has_tx_entry(s, 0x60F4 + base, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x60F4 + base, .subindex = 0x00, .offset = &h->in[j].followingError };
+        if (!s || motor_api_eni_has_tx_entry(s, 0x60FD + base, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x60FD + base, .subindex = 0x00, .offset = &h->in[j].digitalInputs };
+        if (!s || motor_api_eni_has_tx_entry(s, 0x60B9 + base, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x60B9 + base, .subindex = 0x00, .offset = &h->in[j].touchProbeStatus };
+        if (!s || motor_api_eni_has_tx_entry(s, 0x60BA + base, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x60BA + base, .subindex = 0x00, .offset = &h->in[j].touchProbePos };
+        if (!s || motor_api_eni_has_tx_entry(s, 0x213F + base, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x213F + base, .subindex = 0x00, .offset = &h->in[j].servoErrorCode };
+        if (!s || motor_api_eni_has_tx_entry(s, 0x2026 + base, 0)) regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x2026 + base, .subindex = 0x00, .offset = &h->in[j].brakeDelay };
+    }
+     regs[r] = (ec_pdo_entry_reg_t){0};
+
+     if (ecrt_domain_reg_pdo_entry_list(h->domain, regs)) { 
+         if (eni_slaves) motor_api_free_eni_slaves(eni_slaves, cnt); 
+         ecrt_release_master(h->master); 
+         free(h); 
+         return MA_ERR_CONFIG; 
+     }
+
+     /* DC 配置：选 0 号从站为参考时钟，统一 Sync0 周期 */
     ecrt_master_select_reference_clock(h->master, h->sc[0]);
     for (uint16_t i = 0; i < cnt; ++i) {
         if (h->vendor_id[i] == 0x000116C7) {
@@ -443,6 +553,13 @@ EXTERNFUNC ma_status_t motor_api_create(const char *eni_path,
     h->barrier_armed = 0; h->barrier_start_ns = 0; h->barrier_delay_ns = 1000000000ULL; h->motion_started = 0;
     memset(h->seen_enabled, 0, sizeof(h->seen_enabled));
     /* 创建后打印已注册 PDO 列表 */
+    printf("[INFO] Registered axes: %u\n", h->axis_count);
+    for (uint16_t j = 0; j < h->axis_count; ++j) {
+        ma_axis_map_t *ax = &h->axis_map[j];
+        uint16_t i = ax->slave_idx;
+        printf("[AXIS%d] slave:%u type:%d base:0x%04X\n", j, i, ax->type, ax->base_offset);
+    }
+
     for (uint16_t i = 0; i < cnt; ++i) {
         printf("[PDO] Slave position=%u vid=0x%08X pid=0x%08X\n", h->position[i], h->vendor_id[i], h->product_code[i]);
         if (eni_slaves) {
@@ -477,12 +594,29 @@ EXTERNFUNC ma_status_t motor_api_create(const char *eni_path,
             printf("  Rx: 0x6040:0 16, 0x6060:0 8, 0x607A:0 32, 0x60B8:0 16\n");
             printf("  Tx: 0x6041:0 16, 0x6064:0 32, 0x6061:0 8, 0x603F:0 16, 0x60F4:0 32, 0x60FD:0 32, 0x60B9:0 16, 0x60BA:0 32, 0x213F:0 16\n");
         }
-        printf("[OFFS%d] out:6040=%u 6060=%u 607A=%u 60C2=%u | in:6041=%u 6064=%u 6061=%u 606C=%u 6077=%u 603F=%u 2026=%u\n",
-               i,
-               h->out[i].controlWord, h->out[i].workModeOut, h->out[i].targetPosition, h->out[i].interpolationCtrl,
-               h->in[i].statusword, h->in[i].actualPosition, h->in[i].workModeIn, h->in[i].actualVelocity, h->in[i].actualTorque, h->in[i].errorCode, h->in[i].brakeDelay);
+        printf("[OFFS_SLAVE%d] (use axis view to see data)\n", i);
     }
     *out_handle = (struct motor_api_handle *)h; if (out_slave_count) *out_slave_count = cnt; if (eni_slaves) motor_api_free_eni_slaves(eni_slaves, cnt);
+    return MA_OK;
+}
+
+/*
+ * 函数: motor_api_config_axis
+ * 功能: 配置轴的机械参数，用于内部单位转换。
+ */
+EXTERNFUNC ma_status_t motor_api_config_axis(struct motor_api_handle *handle,
+                                             uint16_t axis_idx,
+                                             uint32_t encoder_res,
+                                             double gear_ratio,
+                                             double unit_per_rev) {
+    motor_api_handle_t *h = (motor_api_handle_t *)handle;
+    if (!h || axis_idx >= h->axis_count) return MA_ERR_PARAM;
+    if (encoder_res == 0) encoder_res = 1; 
+    if (unit_per_rev == 0.0) unit_per_rev = 1.0; 
+
+    double scale = (double)encoder_res * gear_ratio / unit_per_rev;
+    h->axis_map[axis_idx].scale_pos = scale;
+    h->axis_map[axis_idx].scale_vel = scale; 
     return MA_OK;
 }
 
@@ -496,6 +630,13 @@ EXTERNFUNC ma_status_t motor_api_destroy(struct motor_api_handle *handle) {
     pthread_mutex_destroy(&h->cmd_mutex);
     free(h);
     return MA_OK;
+}
+
+EXTERNFUNC ma_status_t motor_api_create(const char *eni_path,
+                                        uint32_t cycle_us,
+                                        uint16_t *out_slave_count,
+                                        struct motor_api_handle **out_handle) {
+    return motor_api_create_base(eni_path, cycle_us, out_slave_count, out_handle, NULL, 0);
 }
 
 /*
@@ -520,17 +661,21 @@ EXTERNFUNC ma_status_t motor_api_destroy(struct motor_api_handle *handle) {
  */
 static ma_status_t format_diag(motor_api_handle_t *h, char *buf, size_t buf_size) {
     if (!h || !buf || buf_size < 64) return MA_ERR_PARAM;
-    uint16_t sw[MA_MAX_SLAVES] = {0};
-    int8_t md[MA_MAX_SLAVES] = {0};
-    int32_t fe[MA_MAX_SLAVES] = {0};
-    uint16_t ec[MA_MAX_SLAVES] = {0};
-    uint16_t sec[MA_MAX_SLAVES] = {0};
-    uint32_t di[MA_MAX_SLAVES] = {0};
-    uint16_t tpst[MA_MAX_SLAVES] = {0};
-    int32_t tpp[MA_MAX_SLAVES] = {0};
-    int32_t tgt[MA_MAX_SLAVES] = {0};
-    int32_t act[MA_MAX_SLAVES] = {0};
-    for (uint16_t i = 0; i < h->slave_count; ++i) {
+    uint16_t sw[MA_MAX_AXES] = {0};
+    int8_t md[MA_MAX_AXES] = {0};
+    int32_t fe[MA_MAX_AXES] = {0};
+    uint16_t ec[MA_MAX_AXES] = {0};
+    uint16_t sec[MA_MAX_AXES] = {0};
+    uint32_t di[MA_MAX_AXES] = {0};
+    uint16_t tpst[MA_MAX_AXES] = {0};
+    int32_t tpp[MA_MAX_AXES] = {0};
+    int32_t tgt[MA_MAX_AXES] = {0};
+    int32_t act[MA_MAX_AXES] = {0};
+    // 只输出前3轴，避免buffer溢出，或者根据 buf_size 动态调整？
+    // 这里保持原逻辑，但遍历 axis_count
+    uint16_t n_print = h->axis_count > MA_MAX_SLAVES ? MA_MAX_SLAVES : h->axis_count; 
+
+    for (uint16_t i = 0; i < n_print; ++i) {
         sw[i] = MA_RD_U16(h, h->in[i].statusword);
         md[i] = MA_RD_S8(h, h->in[i].workModeIn);
         fe[i] = MA_RD_S32(h, h->in[i].followingError);
@@ -581,7 +726,7 @@ EXTERNFUNC ma_status_t motor_api_clear_error(struct motor_api_handle *handle, in
     motor_api_handle_t *h = (motor_api_handle_t *)handle; if (!h) return MA_ERR_PARAM;
     pthread_mutex_lock(&h->cmd_mutex);
     if (axis_idx == -1) {
-        for (uint16_t i = 0; i < h->slave_count; ++i) {
+        for (uint16_t i = 0; i < h->axis_count; ++i) {
             h->fault_reset_cycles[i] = 2;
             h->servo_enabled[i] = false;
             h->csp_warmup[i] = 10;
@@ -589,7 +734,7 @@ EXTERNFUNC ma_status_t motor_api_clear_error(struct motor_api_handle *handle, in
         h->motion_started = 0;
         h->barrier_armed = 0;
     } else {
-        if (axis_idx < 0 || axis_idx >= (int)h->slave_count) { 
+        if (axis_idx < 0 || axis_idx >= (int)h->axis_count) { 
             pthread_mutex_unlock(&h->cmd_mutex); 
             return MA_ERR_PARAM; 
         }
@@ -709,7 +854,7 @@ static void motor_api_axis_run_motion(motor_api_handle_t *h, uint16_t axis_idx, 
     int step = h->axis_run[axis_idx] ? h->axis_step[axis_idx] : h->cmd_step;
     pthread_mutex_unlock(&h->cmd_mutex);
 
-    int delta = run ? (dir * step) : 0;
+    int delta = run ? (int)(dir * step * h->axis_map[axis_idx].scale_pos) : 0;
     if (delta > MA_MAX_DELTA_PER_CYCLE) delta = MA_MAX_DELTA_PER_CYCLE;
     if (delta < -MA_MAX_DELTA_PER_CYCLE) delta = -MA_MAX_DELTA_PER_CYCLE;
     
@@ -742,9 +887,9 @@ static void motor_api_axis_run_motion(motor_api_handle_t *h, uint16_t axis_idx, 
  * motor_api_commit_fault_reset_cycles
  * 功能: 周期末提交并递减 fault reset 计数（只对已请求的轴递减）。
  */
-static void motor_api_commit_fault_reset_cycles(motor_api_handle_t *h, const uint8_t fr_cycles[MA_MAX_SLAVES]) {
+static void motor_api_commit_fault_reset_cycles(motor_api_handle_t *h, const uint8_t fr_cycles[MA_MAX_AXES]) {
     pthread_mutex_lock(&h->cmd_mutex);
-    for (uint16_t i = 0; i < h->slave_count; ++i) {
+    for (uint16_t i = 0; i < h->axis_count; ++i) {
         if (fr_cycles[i] > 0) h->fault_reset_cycles[i] = (uint8_t)(fr_cycles[i] - 1);
     }
     pthread_mutex_unlock(&h->cmd_mutex);
@@ -756,26 +901,41 @@ static void motor_api_commit_fault_reset_cycles(motor_api_handle_t *h, const uin
  */
 static void motor_api_update_barrier(motor_api_handle_t *h) {
     int all_enabled = 1;
-    for (uint16_t i = 0; i < h->slave_count; ++i) all_enabled = all_enabled && h->seen_enabled[i];
+    // 只检查 CiA402 轴
+    int cia_axes_count = 0;
+    for (uint16_t i = 0; i < h->axis_count; ++i) {
+        if (h->axis_map[i].type == MA_AXIS_TYPE_CIA402) {
+            all_enabled = all_enabled && h->seen_enabled[i];
+            cia_axes_count++;
+        }
+    }
+    // 如果全是 IO 轴，直接标记 started? 或者不需要 barrier
+    if (cia_axes_count == 0) {
+        h->motion_started = 1; 
+        return; 
+    }
+
     if (h->motion_started) return;
 
     if (!h->barrier_armed && all_enabled) {
         h->barrier_armed = 1;
         h->barrier_start_ns = motor_api_monotonic_ns();
-        printf("[BARRIER_ARM] all at 0x027 (enabled), wait 1s\n");
+        printf("[BARRIER_ARM] all CiA402 axes at 0x027 (enabled), wait 1s\n");
     }
     if (!h->barrier_armed) return;
 
     uint64_t now = motor_api_monotonic_ns();
     if (now - h->barrier_start_ns < h->barrier_delay_ns) return;
 
-    for (uint16_t i = 0; i < h->slave_count; ++i) {
-        h->csp_target[i] = MA_RD_S32(h, h->in[i].actualPosition);
-        MA_WR_S32(h, h->out[i].targetPosition, h->csp_target[i]);
-        MA_WR_U16(h, h->out[i].controlWord, 0x0F);
-        MA_WR_S8(h, h->out[i].workModeOut, (int8_t)MA_MODE_CSP);
+    for (uint16_t i = 0; i < h->axis_count; ++i) {
+        if (h->axis_map[i].type == MA_AXIS_TYPE_CIA402) {
+            h->csp_target[i] = MA_RD_S32(h, h->in[i].actualPosition);
+            MA_WR_S32(h, h->out[i].targetPosition, h->csp_target[i]);
+            MA_WR_U16(h, h->out[i].controlWord, 0x0F);
+            MA_WR_S8(h, h->out[i].workModeOut, (int8_t)MA_MODE_CSP);
+        }
     }
-    printf("[BARRIER_FIRE] synchronized motion start after 1s (enabled), slaves=%u\n", h->slave_count);
+    printf("[BARRIER_FIRE] synchronized motion start after 1s (enabled), axes=%u\n", h->axis_count);
     h->motion_started = 1;
     h->barrier_armed = 0;
 }
@@ -807,6 +967,12 @@ static void motor_api_cycle_end(motor_api_handle_t *h) {
  * 功能: 单轴周期控制：更新状态、处理清错、推进使能或运动控制。
  */
 static void motor_api_axis_process(motor_api_handle_t *h, uint16_t axis_idx, uint8_t fr_cycle, int dbg_tick) {
+    if (axis_idx >= h->axis_count) return;
+    if (h->axis_map[axis_idx].type == MA_AXIS_TYPE_IO) {
+        // IO 轴无需状态机，仅透传数据（已在 domain process 中完成）
+        return;
+    }
+
     uint16_t status_i = MA_RD_U16(h, h->in[axis_idx].statusword);
     h->seen_enabled[axis_idx] = (((status_i & 0x6F) == 0x27) ? true : false);
 
@@ -835,9 +1001,9 @@ EXTERNFUNC ma_status_t motor_api_run_once(struct motor_api_handle *handle) {
     ecrt_master_application_time(h->master, motor_api_monotonic_ns());
     motor_api_cycle_begin(h);
     static int dbg_tick = 0; dbg_tick++;
-    uint8_t fr_cycles[MA_MAX_SLAVES];
+    uint8_t fr_cycles[MA_MAX_AXES];
     motor_api_snapshot_fault_reset_cycles(h, fr_cycles);
-    for (uint16_t i = 0; i < h->slave_count; ++i) {
+    for (uint16_t i = 0; i < h->axis_count; ++i) {
         motor_api_axis_process(h, i, fr_cycles[i], dbg_tick);
     }
     motor_api_commit_fault_reset_cycles(h, fr_cycles);

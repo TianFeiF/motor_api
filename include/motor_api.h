@@ -58,6 +58,37 @@ EXTERNFUNC ma_status_t motor_api_create(const char *eni_path,
                                         struct motor_api_handle **out_handle);
 
 /*
+ * 函数: motor_api_config_axis
+ * 功能: 配置轴的机械参数，用于内部单位转换（用户单位 <-> 脉冲）。
+ * 参数:
+ *   - handle: 库句柄
+ *   - axis_idx: 轴索引
+ *   - encoder_res: 编码器分辨率（单圈脉冲数），例如 131072 (17-bit)
+ *   - gear_ratio: 减速比（电机圈数/负载圈数），例如 10.0
+ *   - unit_per_rev: 用户单位每圈数值（例如 360 度/圈，或 5 毫米/圈）。
+ *                   若为 0，则默认用户单位为“圈”（revolutions）。
+ * 返回:
+ *   - MA_OK 成功；MA_ERR_PARAM 参数错误
+ */
+EXTERNFUNC ma_status_t motor_api_config_axis(struct motor_api_handle *handle,
+                                             uint16_t axis_idx,
+                                             uint32_t encoder_res,
+                                             double gear_ratio,
+                                             double unit_per_rev);
+
+/*
+ * 函数: motor_api_create_from_config
+ * 功能: 从 JSON 配置文件加载网络参数、从站/轴映射及机械参数，并初始化主站。
+ * 参数:
+ *   - config_path: JSON 配置文件路径
+ *   - out_handle: 输出句柄
+ * 返回:
+ *   - MA_OK 成功
+ */
+EXTERNFUNC ma_status_t motor_api_create_from_config(const char *config_path,
+                                                    struct motor_api_handle **out_handle);
+
+/*
  * 函数: motor_api_destroy
  * 功能: 释放库句柄与主站资源，关闭线程与互斥量。
  * 参数:

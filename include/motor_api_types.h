@@ -32,6 +32,28 @@ extern "C" {
 #include <stdbool.h>
 
 /*
+ * MA_MAX_SLAVES
+ * 库内部支持的最大从站数量上限（静态数组容量）。
+ */
+#define MA_MAX_SLAVES 16
+
+/*
+ * MA_MAX_AXES
+ * 库支持的最大逻辑轴数量（可能大于从站数，例如双轴驱动器）。
+ */
+#define MA_MAX_AXES 32
+
+/*
+ * ma_axis_type_t
+ * 轴类型定义
+ */
+typedef enum {
+    MA_AXIS_TYPE_NONE = 0,
+    MA_AXIS_TYPE_CIA402 = 1,  // 标准 CiA402 伺服轴
+    MA_AXIS_TYPE_IO = 2       // 纯 IO 设备（不运行状态机）
+} ma_axis_type_t;
+
+/*
  * ma_status_t
  * 统一返回码：所有对外 API 尽量用该枚举表述结果，避免返回 -1/-2 这类难以统一的错误码。
  */
