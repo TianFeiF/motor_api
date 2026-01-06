@@ -501,13 +501,40 @@ ma_status_t motor_api_create_base(const char *eni_path,
 
         if (ax->type == MA_AXIS_TYPE_IO) {
             // IO 设备映射：Input -> digitalInputs(0x60FD), Output -> digitalOutputs (reuse controlWord?)
-            // 暂时只映射 Input 到 digitalInputs (0x60FD local storage), Output 到 controlWord (0x6040 local storage)
-            // 注意：这里需要根据实际 IO 模块的对象字典调整。
-            // 假设 Input 在 0x6000:01, Output 在 0x7000:01
-            if (!s || motor_api_eni_has_tx_entry(s, 0x6000, 1)) 
-                regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x6000, .subindex = 0x01, .offset = &h->in[j].digitalInputs };
-            if (!s || motor_api_eni_has_rx_entry(s, 0x7000, 1))
-                regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x7000, .subindex = 0x01, .offset = &h->out[j].controlWord }; // 借用 controlWord
+            // 策略：
+            // 1. Input: 优先尝试 0x6000:00 (U32, Inexbot), 0x6000:01 (U32), 0x6001:01 (U16, F2838x), 0x60FD:00 (U32)
+            // 2. Output: 优先尝试 0x7000:01 (U32, Inexbot), 0x7001:01 (U16, F2838x), 0x60FE:01 (U32)
+            
+            // Input Mapping
+            if (s) {
+                if (motor_api_eni_has_tx_entry(s, 0x6000, 0)) {
+                    regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x6000, .subindex = 0x00, .offset = &h->in[j].digitalInputs };
+                    ax->io_size_in = 4;
+                } else if (motor_api_eni_has_tx_entry(s, 0x6000, 1)) {
+                    regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x6000, .subindex = 0x01, .offset = &h->in[j].digitalInputs };
+                    ax->io_size_in = 4;
+                } else if (motor_api_eni_has_tx_entry(s, 0x6001, 1)) {
+                    regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x6001, .subindex = 0x01, .offset = &h->in[j].digitalInputs };
+                    ax->io_size_in = 2;
+                } else if (motor_api_eni_has_tx_entry(s, 0x60FD, 0)) {
+                     regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x60FD, .subindex = 0x00, .offset = &h->in[j].digitalInputs };
+                     ax->io_size_in = 4;
+                }
+            }
+            
+            // Output Mapping
+            if (s) {
+                if (motor_api_eni_has_rx_entry(s, 0x7000, 1)) {
+                    regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x7000, .subindex = 0x01, .offset = &h->out[j].controlWord };
+                    ax->io_size_out = 4; // Assume U32 for 0x7000:01 (Inexbot)
+                } else if (motor_api_eni_has_rx_entry(s, 0x7001, 1)) {
+                    regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x7001, .subindex = 0x01, .offset = &h->out[j].controlWord };
+                    ax->io_size_out = 2; // Assume U16 for 0x7001:01 (F2838x)
+                } else if (motor_api_eni_has_rx_entry(s, 0x60FE, 1)) {
+                    regs[r++] = (ec_pdo_entry_reg_t){ .alias = 0, .position = h->position[i], .vendor_id = h->vendor_id[i], .product_code = h->product_code[i], .index = 0x60FE, .subindex = 0x01, .offset = &h->out[j].controlWord };
+                    ax->io_size_out = 4;
+                }
+            }
             continue;
         }
 
@@ -709,6 +736,33 @@ static ma_status_t format_diag(motor_api_handle_t *h, char *buf, size_t buf_size
 EXTERNFUNC ma_status_t motor_api_format_diag_json(struct motor_api_handle *handle, char *buf, size_t buf_size) {
     motor_api_handle_t *h = (motor_api_handle_t *)handle; if (!h) return MA_ERR_PARAM;
     return format_diag(h, buf, buf_size);
+}
+
+EXTERNFUNC ma_status_t motor_api_set_io_output(struct motor_api_handle *handle, uint16_t axis_idx, uint32_t value) {
+    motor_api_handle_t *h = (motor_api_handle_t *)handle;
+    if (!h || axis_idx >= h->axis_count) return MA_ERR_PARAM;
+    if (h->axis_map[axis_idx].type != MA_AXIS_TYPE_IO) return MA_ERR_PARAM;
+    
+    /* 根据映射时记录的 size 决定写 U16 还是 U32 */
+    /* 由于 offset 只是个偏移，底层 EC_WRITE 需要知道写多少字节 */
+    /* 我们用 controlWord 这个 U16 offset 变量来存储偏移 */
+    
+    if (h->axis_map[axis_idx].io_size_out == 4) {
+        MA_WR_U32(h, h->out[axis_idx].controlWord, value);
+    } else {
+        MA_WR_U16(h, h->out[axis_idx].controlWord, (uint16_t)value);
+    }
+    return MA_OK;
+}
+
+EXTERNFUNC ma_status_t motor_api_get_io_input(struct motor_api_handle *handle, uint16_t axis_idx, uint32_t *out_value) {
+    motor_api_handle_t *h = (motor_api_handle_t *)handle;
+    if (!h || !out_value || axis_idx >= h->axis_count) return MA_ERR_PARAM;
+    if (h->axis_map[axis_idx].type != MA_AXIS_TYPE_IO) return MA_ERR_PARAM;
+    
+    /* IO input mapped to digitalInputs offset (0x6000:01) */
+    *out_value = MA_RD_U32(h, h->in[axis_idx].digitalInputs);
+    return MA_OK;
 }
 
 /*

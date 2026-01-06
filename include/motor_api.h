@@ -124,6 +124,33 @@ EXTERNFUNC ma_status_t motor_api_format_diag_json(struct motor_api_handle *handl
                                                   char *buf,
                                                   size_t buf_size);
 
+/*
+ * 函数: motor_api_set_io_output
+ * 功能: 设置 IO 轴的输出值（写到 ControlWord 对应的 PDO 映射区）。
+ * 参数:
+ *   - handle: 库句柄
+ *   - axis_idx: 轴索引（必须是 IO 类型的轴）
+ *   - value: 输出值（通常为 bit mask）
+ * 返回:
+ *   - MA_OK 成功
+ *   - MA_ERR_PARAM 轴索引越界或不是 IO 轴
+ */
+EXTERNFUNC ma_status_t motor_api_set_io_output(struct motor_api_handle *handle, uint16_t axis_idx, uint32_t value);
+
+
+/*
+ * 函数: motor_api_get_io_input
+ * 功能: 获取 IO 轴的输入值（从 DigitalInputs 对应的 PDO 映射区读取）。
+ * 参数:
+ *   - handle: 库句柄
+ *   - axis_idx: 轴索引（必须是 IO 类型的轴）
+ *   - out_value: 输出值的指针
+ * 返回:
+ *   - MA_OK 成功
+ *   - MA_ERR_PARAM 轴索引越界或不是 IO 轴
+ */
+EXTERNFUNC ma_status_t motor_api_get_io_input(struct motor_api_handle *handle, uint16_t axis_idx, uint32_t *out_value);
+
 EXTERNFUNC ma_status_t motor_api_clear_error(struct motor_api_handle *handle, int axis_idx);
 
 EXTERNFUNC ma_status_t eth_initDLL(uint32_t timeout_ms,

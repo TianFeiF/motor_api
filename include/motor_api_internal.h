@@ -66,6 +66,8 @@ typedef struct {
     uint16_t base_offset;   // 对象字典基地址偏移（如 0x6000 或 0x6800）
     double scale_pos;       // 位置比例因子（用户单位 -> 脉冲）
     double scale_vel;       // 速度比例因子
+    uint8_t io_size_in;     // IO 输入字节数 (2/4)
+    uint8_t io_size_out;    // IO 输出字节数 (2/4)
 } ma_axis_map_t;
 
 /*
@@ -169,6 +171,9 @@ static inline int8_t MA_RD_S8(motor_api_handle_t *h, unsigned int off) {
 }
 static inline void MA_WR_U16(motor_api_handle_t *h, unsigned int off, uint16_t v) {
     if (off != UINT_MAX) EC_WRITE_U16(h->domain_pd + off, v);
+}
+static inline void MA_WR_U32(motor_api_handle_t *h, unsigned int off, uint32_t v) {
+    if (off != UINT_MAX) EC_WRITE_U32(h->domain_pd + off, v);
 }
 static inline void MA_WR_S32(motor_api_handle_t *h, unsigned int off, int32_t v) {
     if (off != UINT_MAX) EC_WRITE_S32(h->domain_pd + off, v);

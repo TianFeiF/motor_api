@@ -1,0 +1,83 @@
+<?xml version="1.0" ?>
+<EtherCATInfoList>
+  <!-- Slaves 0-5: Generic CiA402 Drive (Based on HCFA X3E) -->
+  <EtherCATInfo>
+    <Vendor><Id>71367</Id></Vendor>
+    <Descriptions><Devices><Device>
+      <Type ProductCode="#x003e0402" RevisionNo="#x00000001">HCFA X3E Servo Driver</Type>
+      <Name><![CDATA[HCFA X3E Servo Driver]]></Name>
+      <Sm Enable="1" StartAddress="#x1000" ControlByte="#x26" DefaultSize="128" />
+      <Sm Enable="1" StartAddress="#x1400" ControlByte="#x22" DefaultSize="128" />
+      <Sm Enable="1" StartAddress="#x1800" ControlByte="#x64" DefaultSize="9" />
+      <Sm Enable="1" StartAddress="#x1c00" ControlByte="#x20" DefaultSize="25" />
+      <RxPdo Sm="2" Fixed="1" Mandatory="1"><Index>#x1600</Index><Name>1st RxPDO-Mapping</Name>
+        <Entry><Index>#x6040</Index><SubIndex>0</SubIndex><BitLen>16</BitLen><Name>Control Word</Name><DataType>UINT16</DataType></Entry>
+        <Entry><Index>#x6060</Index><SubIndex>0</SubIndex><BitLen>8</BitLen><Name>Modes of operation</Name><DataType>UINT8</DataType></Entry>
+        <Entry><Index>#x607a</Index><SubIndex>0</SubIndex><BitLen>32</BitLen><Name>Target position</Name><DataType>UINT32</DataType></Entry>
+        <Entry><Index>#x60b8</Index><SubIndex>0</SubIndex><BitLen>16</BitLen><Name>Touch Probe Function</Name><DataType>UINT16</DataType></Entry>
+        <Entry><Index>#x60c2</Index><SubIndex>1</SubIndex><BitLen>8</BitLen><Name>Interpolation time period</Name><DataType>SINT8</DataType></Entry>
+        <Entry><Index>#x60c2</Index><SubIndex>2</SubIndex><BitLen>8</BitLen><Name>Interpolation time index</Name><DataType>SINT8</DataType></Entry>
+      </RxPdo>
+      <TxPdo Sm="3" Fixed="1" Mandatory="1"><Index>#x1a00</Index><Name>1st TxPDO-Mapping</Name>
+        <Entry><Index>#x603f</Index><SubIndex>0</SubIndex><BitLen>16</BitLen><Name>Error Code</Name><DataType>UINT16</DataType></Entry>
+        <Entry><Index>#x6041</Index><SubIndex>0</SubIndex><BitLen>16</BitLen><Name>Status Word</Name><DataType>UINT16</DataType></Entry>
+        <Entry><Index>#x6064</Index><SubIndex>0</SubIndex><BitLen>32</BitLen><Name>Position actual value</Name><DataType>UINT32</DataType></Entry>
+        <Entry><Index>#x6061</Index><SubIndex>0</SubIndex><BitLen>8</BitLen><Name>Modes of operation display</Name><DataType>UINT8</DataType></Entry>
+        <Entry><Index>#x60b9</Index><SubIndex>0</SubIndex><BitLen>16</BitLen><Name>Touch Probe Status</Name><DataType>UINT16</DataType></Entry>
+        <Entry><Index>#x60ba</Index><SubIndex>0</SubIndex><BitLen>32</BitLen><Name>Touch Probe1 Pos1 Pos Value</Name><DataType>UINT32</DataType></Entry>
+        <Entry><Index>#x60f4</Index><SubIndex>0</SubIndex><BitLen>32</BitLen><Name>Following error actual value</Name><DataType>UINT32</DataType></Entry>
+        <Entry><Index>#x60fd</Index><SubIndex>0</SubIndex><BitLen>32</BitLen><Name>Digital inputs</Name><DataType>UINT32</DataType></Entry>
+        <Entry><Index>#x213f</Index><SubIndex>0</SubIndex><BitLen>16</BitLen><Name>Servo Error Code</Name><DataType>UINT16</DataType></Entry>
+      </TxPdo>
+    </Device></Devices></Descriptions>
+  </EtherCATInfo>
+
+  <!-- Repeat Slaves 1-5 (Same as 0) -->
+  <EtherCATInfo><Vendor><Id>71367</Id></Vendor><Descriptions><Devices><Device><Type ProductCode="#x003e0402" RevisionNo="#x00000001">HCFA X3E</Type></Device></Devices></Descriptions></EtherCATInfo>
+  <EtherCATInfo><Vendor><Id>71367</Id></Vendor><Descriptions><Devices><Device><Type ProductCode="#x003e0402" RevisionNo="#x00000001">HCFA X3E</Type></Device></Devices></Descriptions></EtherCATInfo>
+  <EtherCATInfo><Vendor><Id>71367</Id></Vendor><Descriptions><Devices><Device><Type ProductCode="#x003e0402" RevisionNo="#x00000001">HCFA X3E</Type></Device></Devices></Descriptions></EtherCATInfo>
+  <EtherCATInfo><Vendor><Id>71367</Id></Vendor><Descriptions><Devices><Device><Type ProductCode="#x003e0402" RevisionNo="#x00000001">HCFA X3E</Type></Device></Devices></Descriptions></EtherCATInfo>
+  <EtherCATInfo><Vendor><Id>71367</Id></Vendor><Descriptions><Devices><Device><Type ProductCode="#x003e0402" RevisionNo="#x00000001">HCFA X3E</Type></Device></Devices></Descriptions></EtherCATInfo>
+
+  <!-- Slave 6: INEXBOT-IO-R4 -->
+  <EtherCATInfo>
+    <Vendor><Id>37</Id></Vendor>
+    <Descriptions><Devices><Device>
+      <Type ProductCode="#x00000530" RevisionNo="#x00010000">INEXBOT-IO-R4</Type>
+      <Name><![CDATA[INEXBOT-IO-R4]]></Name>
+      <Sm Enable="1" StartAddress="#x1000" ControlByte="#x26" DefaultSize="128" />
+      <Sm Enable="1" StartAddress="#x1080" ControlByte="#x22" DefaultSize="128" />
+      <Sm Enable="1" StartAddress="#x1100" ControlByte="#x64" DefaultSize="3" />
+      <Sm Enable="1" StartAddress="#x1400" ControlByte="#x20" DefaultSize="3" />
+      <RxPdo Sm="2" Fixed="1" Mandatory="1">
+        <Index>#x1600</Index><Name>RxPDO-Map</Name>
+        <Entry><Index>#x7000</Index><SubIndex>1</SubIndex><BitLen>32</BitLen><Name>SubIndex 001</Name><DataType>UINT32</DataType></Entry>
+      </RxPdo>
+      <TxPdo Sm="3" Fixed="1" Mandatory="1">
+        <Index>#x1a00</Index><Name>TxPDO-Map</Name>
+        <Entry><Index>#x6000</Index><SubIndex>0</SubIndex><BitLen>32</BitLen><Name>SubIndex 000</Name><DataType>UINT32</DataType></Entry>
+      </TxPdo>
+    </Device></Devices></Descriptions>
+  </EtherCATInfo>
+
+  <!-- Slave 7: F2838x CPU1 EtherCAT Slave -->
+  <EtherCATInfo>
+    <Vendor><Id>2103569</Id></Vendor>
+    <Descriptions><Devices><Device>
+      <Type ProductCode="#x10003201" RevisionNo="#x00000001">F2838x CPU1 EtherCAT Slave</Type>
+      <Name><![CDATA[F2838x CPU1 EtherCAT Slave]]></Name>
+      <Sm Enable="1" StartAddress="#x1000" ControlByte="#x26" DefaultSize="512" />
+      <Sm Enable="1" StartAddress="#x1200" ControlByte="#x22" DefaultSize="512" />
+      <Sm Enable="1" StartAddress="#x1400" ControlByte="#x64" DefaultSize="11" />
+      <Sm Enable="1" StartAddress="#x1700" ControlByte="#x20" DefaultSize="11" />
+      <RxPdo Sm="2" Fixed="1" Mandatory="1">
+        <Index>#x1600</Index><Name>LEDS process data mapping</Name>
+        <Entry><Index>#x7001</Index><SubIndex>1</SubIndex><BitLen>16</BitLen><Name>DigitalOutputs</Name><DataType>UINT16</DataType></Entry>
+      </RxPdo>
+      <TxPdo Sm="3" Fixed="1" Mandatory="1">
+        <Index>#x1a00</Index><Name>switches process data mapping</Name>
+        <Entry><Index>#x6001</Index><SubIndex>1</SubIndex><BitLen>16</BitLen><Name>DigitalInputs</Name><DataType>UINT16</DataType></Entry>
+      </TxPdo>
+    </Device></Devices></Descriptions>
+  </EtherCATInfo>
+</EtherCATInfoList>

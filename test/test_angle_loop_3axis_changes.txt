@@ -1,0 +1,40 @@
+test_angle_loop 三轴同步控制改动说明
+
+目标
+- 原版本：只控制 1 个轴（axis_id=0）
+- 现版本：同时控制 3 个轴（axis_id=0/1/2），每轴都以“度”为单位做往返运动
+
+前提（与 config/config.json 对应）
+- config.json 中为每个轴设置了 unit_per_rev=360.0
+- motor_api 内部换算关系：
+  scale = encoder_res * gear_ratio / unit_per_rev
+  delta_pulse = dir * step * scale
+  因此本示例把 step 当作“度”，即可得到按角度的增量控制
+
+核心改动点
+1) 单轴变量改为三轴数组
+- deg_per_sec[3]：三轴角速度（度/秒）
+- segment_deg[3]：三轴往返段长（度）
+- accum_deg[3]：三轴小数累积器（保证长期平均速度接近 deg_per_sec）
+- seg_deg[3]：三轴当前段累计角度（到达 segment_deg 后反向）
+- dir[3]：三轴方向（1 正向 / -1 反向）
+
+2) 每个周期内对三轴分别下发命令
+- 每次循环：
+  - 对 axis=0..2 逐个计算本周期的 step_int（整数“度”）
+  - 调用 motor_api_set_axis_command(handle, axis, run, dir[axis], cmd_step)
+  - 最后只调用一次 motor_api_run_once(handle)
+
+3) 轴数量保护
+- 默认想控制 3 轴，但如果 h->axis_count < 3，会自动降到可用轴数量
+
+你常改的地方（建议从这里开始改）
+- 改三轴速度：deg_per_sec[0..2]
+- 改三轴段长：segment_deg[0..2]
+- 只想控制其中某几轴：
+  - 把 axes 改成 1/2
+  - 或者在 for(axis=...) 中加条件跳过某些 axis
+
+运行方式（在 build 目录）
+./test_angle_loop ../config/config.json
+

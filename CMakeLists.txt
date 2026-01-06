@@ -3,6 +3,7 @@ project(motor_api C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(MOTOR_API_WERROR "Treat warnings as errors" OFF)
 
@@ -49,6 +50,12 @@ target_link_libraries(test_config motor_api_static ethercat pthread m)
 
 add_executable(test_config_dual test/test_config_dual.c)
 target_link_libraries(test_config_dual motor_api_static ethercat pthread m)
+
+add_executable(test_angle_loop test/test_angle_loop.c)
+target_link_libraries(test_angle_loop motor_api_static ethercat pthread m)
+
+add_executable(test_clear_faults_all test/test_clear_faults_all.c)
+target_link_libraries(test_clear_faults_all motor_api_static ethercat pthread m)
 
 install(TARGETS motor_api_static motor_api_shared example_csp test_read test_eth_initdll
         RUNTIME DESTINATION bin
