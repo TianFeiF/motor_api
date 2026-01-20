@@ -51,7 +51,7 @@ int main(int argc, char *argv[]) {
      * 说明：默认路径是示例作者在 Linux 环境下的路径；在 Windows/其他环境运行时，
      * 请通过命令行参数传入实际 ENI(XML) 路径。
      */
-    const char *eni_path = (argc > 1) ? argv[1] : "/home/phi/ecmotor_api/motor_api/doc/HCFAX3E.xml";
+    const char *eni_path = (argc > 1) ? argv[1] : "/home/phi/ecmotor_api/motor_api/doc/HCFAX3E copy.xml";
     
     /*
      * 这三个数组用于接收 motor_api_read_eni() 输出的从站关键信息。

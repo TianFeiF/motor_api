@@ -57,6 +57,12 @@ target_link_libraries(test_angle_loop motor_api_static ethercat pthread m)
 add_executable(test_clear_faults_all test/test_clear_faults_all.c)
 target_link_libraries(test_clear_faults_all motor_api_static ethercat pthread m)
 
+add_executable(test_manual_control test/test_manual_control.c)
+target_link_libraries(test_manual_control motor_api_static ethercat pthread m)
+
+add_executable(test_arm_control test/test_arm_control.c)
+target_link_libraries(test_arm_control motor_api_static ethercat pthread m)
+
 install(TARGETS motor_api_static motor_api_shared example_csp test_read test_eth_initdll
         RUNTIME DESTINATION bin
         LIBRARY DESTINATION lib

@@ -511,26 +511,33 @@ ma_status_t motor_api_read_eni(const char *eni_path,
                                 e_bit = (int)strtol(num, NULL, 0);
                             }
                         }
-                        if (e_bit == 0) { int bv = parse_attr_int_range_local(ebeg, etag_end, "BitLen"); if (bv > 0) e_bit = bv; }
-                        ents = (ma_eni_pdo_entry_t *)realloc(ents, (ecnt + 1) * sizeof(*ents));
-                        ents[ecnt].index = (uint16_t)e_index;
-                        ents[ecnt].subindex = (uint8_t)e_sub;
-                        ents[ecnt].bitlen = (uint8_t)e_bit;
-                        ecnt++;
-                        ep = eend + 8;
-                    }
-                    ma_eni_pdo_t pdo_out;
-                    pdo_out.pdo_index = (uint16_t)pdo_index;
-                    pdo_out.entry_count = ecnt;
-                    pdo_out.entries = ents;
-                    int dir = kind;
-                    if (dir == 2) { if (pdo_index >= 0x1A00) dir = 1; else dir = 0; }
-                    if (dir == 0) { rx_pdos = (ma_eni_pdo_t *)realloc(rx_pdos, (rx_cnt + 1) * sizeof(*rx_pdos)); rx_pdos[rx_cnt++] = pdo_out; }
-                    else { tx_pdos = (ma_eni_pdo_t *)realloc(tx_pdos, (tx_cnt + 1) * sizeof(*tx_pdos)); tx_pdos[tx_cnt++] = pdo_out; }
-                    scan = endp + 7;
-                }
+                if (e_bit == 0) { int bv = parse_attr_int_range_local(ebeg, eend, "BitLen"); if (bv > 0) e_bit = bv; }
+                ents = (ma_eni_pdo_entry_t *)realloc(ents, (ecnt + 1) * sizeof(*ents));
+                ents[ecnt].index = (uint16_t)e_index;
+                ents[ecnt].subindex = (uint8_t)e_sub;
+                ents[ecnt].bitlen = (uint8_t)e_bit;
+                ecnt++;
+                ep = eend + 7;
+            }
+            ma_eni_pdo_t pdo_out;
+            pdo_out.pdo_index = (uint16_t)pdo_index;
+            pdo_out.entry_count = ecnt;
+            pdo_out.entries = ents;
+            
+            int dir = kind;
+            if (dir == 2) { if (pdo_index >= 0x1A00) dir = 1; else dir = 0; }
 
-                slaves = (ma_eni_slave_t *)realloc(slaves, (count + 1) * sizeof(*slaves));
+            if (dir == 0) { 
+                rx_pdos = (ma_eni_pdo_t *)realloc(rx_pdos, (rx_cnt + 1) * sizeof(*rx_pdos)); 
+                rx_pdos[rx_cnt++] = pdo_out; 
+            } else { 
+                tx_pdos = (ma_eni_pdo_t *)realloc(tx_pdos, (tx_cnt + 1) * sizeof(*tx_pdos)); 
+                tx_pdos[tx_cnt++] = pdo_out; 
+            }
+            scan = endp + 6;
+        }
+
+        slaves = (ma_eni_slave_t *)realloc(slaves, (count + 1) * sizeof(*slaves));
                 slaves[count].vendor_id = v ? v : 0x000116c7;
                 slaves[count].product_code = pc ? pc : 0x003e0402;
                 slaves[count].position = ps;
@@ -589,14 +596,17 @@ ma_status_t motor_api_read_eni(const char *eni_path,
         while (1) {
             const char *rx = strncasestr_local(scan, (size_t)(end - scan), "<RxPdo");
             const char *tx = strncasestr_local(scan, (size_t)(end - scan), "<TxPdo");
-            if (!rx && !tx) break;
-            int is_rx = 0;
+            const char *pdo = strncasestr_local(scan, (size_t)(end - scan), "<Pdo");
+            if (!rx && !tx && !pdo) break;
+            int kind = -1;
             const char *pdo_beg = NULL;
-            if (rx && (!tx || rx < tx)) { is_rx = 1; pdo_beg = rx; }
-            else { is_rx = 0; pdo_beg = tx; }
+            if (rx && (!tx || rx < tx) && (!pdo || rx < pdo)) { kind = 0; pdo_beg = rx; }
+            else if (tx && (!rx || tx < rx) && (!pdo || tx < pdo)) { kind = 1; pdo_beg = tx; }
+            else { kind = 2; pdo_beg = pdo; }
             const char *pdo_end = NULL;
-            if (is_rx) pdo_end = strncasestr_local(pdo_beg, (size_t)(end - pdo_beg), "</RxPdo>");
-            else pdo_end = strncasestr_local(pdo_beg, (size_t)(end - pdo_beg), "</TxPdo>");
+            if (kind == 0) pdo_end = strncasestr_local(pdo_beg, (size_t)(end - pdo_beg), "</RxPdo>");
+            else if (kind == 1) pdo_end = strncasestr_local(pdo_beg, (size_t)(end - pdo_beg), "</TxPdo>");
+            else pdo_end = strncasestr_local(pdo_beg, (size_t)(end - pdo_beg), "</Pdo>");
             if (!pdo_end) break;
             int pdo_index = 0x0000;
             {
@@ -667,15 +677,24 @@ ma_status_t motor_api_read_eni(const char *eni_path,
                 ents[ecnt].subindex = (uint8_t)e_sub;
                 ents[ecnt].bitlen = (uint8_t)e_bit;
                 ecnt++;
-                ep = eend + 8;
+                ep = eend + 7;
             }
-            ma_eni_pdo_t pdo;
-            pdo.pdo_index = (uint16_t)pdo_index;
-            pdo.entry_count = ecnt;
-            pdo.entries = ents;
-            if (is_rx) { rx_pdos = (ma_eni_pdo_t *)realloc(rx_pdos, (rx_cnt + 1) * sizeof(*rx_pdos)); rx_pdos[rx_cnt++] = pdo; }
-            else { tx_pdos = (ma_eni_pdo_t *)realloc(tx_pdos, (tx_cnt + 1) * sizeof(*tx_pdos)); tx_pdos[tx_cnt++] = pdo; }
-            scan = pdo_end + 7;
+            ma_eni_pdo_t pdo_out;
+            pdo_out.pdo_index = (uint16_t)pdo_index;
+            pdo_out.entry_count = ecnt;
+            pdo_out.entries = ents;
+            
+            int dir = kind;
+            if (dir == 2) { if (pdo_index >= 0x1A00) dir = 1; else dir = 0; }
+
+            if (dir == 0) { 
+                rx_pdos = (ma_eni_pdo_t *)realloc(rx_pdos, (rx_cnt + 1) * sizeof(*rx_pdos)); 
+                rx_pdos[rx_cnt++] = pdo_out; 
+            } else { 
+                tx_pdos = (ma_eni_pdo_t *)realloc(tx_pdos, (tx_cnt + 1) * sizeof(*tx_pdos)); 
+                tx_pdos[tx_cnt++] = pdo_out; 
+            }
+            scan = pdo_end + 6;
         }
 
         slaves = (ma_eni_slave_t *)realloc(slaves, (count + 1) * sizeof(*slaves));

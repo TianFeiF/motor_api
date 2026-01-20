@@ -8,21 +8,28 @@
       "id": 0,
       "type": "single_axis",
       "axes": [
-        { "axis_id": 0, "encoder_res": 131072, "gear_ratio": 1.0, "unit_per_rev": 360.0 }
+        { "axis_id": 0, "encoder_res": 131072, "gear_ratio": 1.0, "unit_per_rev": 360000.0 }
       ]
     },
     {
       "id": 1,
       "type": "single_axis",
       "axes": [
-        { "axis_id": 1, "encoder_res": 131072, "gear_ratio": 1.0, "unit_per_rev": 360.0 }
+        { "axis_id": 1, "encoder_res": 131072, "gear_ratio": 1.0, "unit_per_rev": 360000.0 }
       ]
     },
     {
       "id": 2,
       "type": "single_axis",
       "axes": [
-        { "axis_id": 2, "encoder_res": 131072, "gear_ratio": 1.0, "unit_per_rev": 360.0 }
+        { "axis_id": 2, "encoder_res": 131072, "gear_ratio": 1.0, "unit_per_rev": 360000.0 }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "io",
+      "axes": [
+        { "axis_id": 3 }
       ]
     }
   ]
