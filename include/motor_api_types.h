@@ -54,6 +54,19 @@ typedef enum {
 } ma_axis_type_t;
 
 /*
+ * ma_axis_map_t
+ * 轴映射配置结构体（用于 JSON 配置或手动覆盖）
+ */
+typedef struct {
+    bool active;
+    uint16_t slave_idx;
+    ma_axis_type_t type;
+    uint16_t base_offset; // 相对 PDO 起始偏移（高级用法）
+    double scale_pos;
+    double scale_vel;
+} ma_axis_map_t;
+
+/*
  * ma_status_t
  * 统一返回码：所有对外 API 尽量用该枚举表述结果，避免返回 -1/-2 这类难以统一的错误码。
  */

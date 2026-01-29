@@ -28,7 +28,7 @@ EXTERNFUNC ma_status_t motor_api_set_command(struct motor_api_handle *handle,
                                              int step);
 
 EXTERNFUNC ma_status_t motor_api_set_axis_command(struct motor_api_handle *handle,
-                                                  int axis_idx,
+                                                  uint16_t axis_idx,
                                                   bool run,
                                                   int dir,
                                                   int step);

@@ -1,70 +1,60 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.10)
 project(motor_api C)
 
 set(CMAKE_C_STANDARD 99)
-set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-option(MOTOR_API_WERROR "Treat warnings as errors" OFF)
-
-add_compile_options(-Wall -Wextra -O2)
-if(MOTOR_API_WERROR)
-  add_compile_options(-Werror)
-endif()
-
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
-
-add_library(motor_api_static STATIC
-  src/motor_api.c
-  src/motor_api_common.c
-  src/motor_api_net.c
-  src/motor_api_config.c
-  src/cJSON.c
+# Include directories
+include_directories(
+    include
+    src
+    /usr/local/include
 )
-target_link_libraries(motor_api_static ethercat pthread m)
 
-add_library(motor_api_shared SHARED
-  src/motor_api.c
-  src/motor_api_common.c
-  src/motor_api_net.c
-  src/motor_api_config.c
-  src/cJSON.c
+# Source files
+set(SOURCES
+    src/core/ma_core.c
+    src/core/ma_cycle.c
+    src/drivers/drv_cia402.c
+    src/drivers/drv_hans.c
+    src/drivers/drv_io.c
+    src/utils/ma_utils.c
+    src/utils/ma_config.c
+    src/motor_api_facade.c
+    src/motor_api_net.c
+    src/cJSON.c
 )
-target_link_libraries(motor_api_shared ethercat pthread m)
-set_target_properties(motor_api_shared PROPERTIES OUTPUT_NAME motor_api)
 
+# Shared Library
+add_library(motor_api SHARED ${SOURCES})
+target_link_libraries(motor_api ethercat pthread rt m)
+
+# Static Library
+add_library(motor_api_static STATIC ${SOURCES})
+target_link_libraries(motor_api_static ethercat pthread rt m)
+
+# Examples
 add_executable(example_csp examples/example_csp.c)
-target_link_libraries(example_csp motor_api_static ethercat pthread)
+target_link_libraries(example_csp motor_api)
 
-add_executable(test_read examples/test_read.c)
-target_link_libraries(test_read motor_api_static ethercat pthread)
+add_executable(test_io examples/test_io.c)
+target_link_libraries(test_io motor_api)
 
-add_executable(test_eth_initdll examples/test_eth_initdll.c)
-target_link_libraries(test_eth_initdll motor_api_static ethercat pthread)
+add_executable(test_full_raw examples/test_full_raw.c)
+target_link_libraries(test_full_raw ethercat pthread rt)
 
-add_executable(test_main test/test_main.c)
-target_link_libraries(test_main motor_api_static ethercat pthread m)
+add_executable(test_interactive examples/test_interactive.c)
+target_link_libraries(test_interactive motor_api)
 
-add_executable(test_config test/test_config.c)
-target_link_libraries(test_config motor_api_static ethercat pthread m)
+# Tests (Optional, keep existing tests)
+# add_executable(test_read test/test_read.c)
+# target_link_libraries(test_read motor_api)
 
-add_executable(test_config_dual test/test_config_dual.c)
-target_link_libraries(test_config_dual motor_api_static ethercat pthread m)
-
-add_executable(test_angle_loop test/test_angle_loop.c)
-target_link_libraries(test_angle_loop motor_api_static ethercat pthread m)
-
-add_executable(test_clear_faults_all test/test_clear_faults_all.c)
-target_link_libraries(test_clear_faults_all motor_api_static ethercat pthread m)
-
-add_executable(test_manual_control test/test_manual_control.c)
-target_link_libraries(test_manual_control motor_api_static ethercat pthread m)
-
-add_executable(test_arm_control test/test_arm_control.c)
-target_link_libraries(test_arm_control motor_api_static ethercat pthread m)
-
-install(TARGETS motor_api_static motor_api_shared example_csp test_read test_eth_initdll
-        RUNTIME DESTINATION bin
-        LIBRARY DESTINATION lib
-        ARCHIVE DESTINATION lib)
-install(FILES include/motor_api.h include/motor_api_common.h include/motor_api_net.h include/motor_api_types.h DESTINATION include)
+# Install
+install(TARGETS motor_api motor_api_static
+    LIBRARY DESTINATION lib
+    ARCHIVE DESTINATION lib
+)
+install(FILES include/motor_api.h include/motor_api_types.h include/motor_api_common.h include/motor_api_net.h
+    DESTINATION include
+)

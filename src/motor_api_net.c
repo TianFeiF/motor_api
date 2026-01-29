@@ -47,9 +47,9 @@ static void set_cmd_locked(motor_api_handle_t *h, bool run, int dir, int step) {
     if (step > 100000) step = 100000;
     if (dir != -1 && dir != 0 && dir != 1) dir = 0;
     pthread_mutex_lock(&h->cmd_mutex);
-    h->cmd_run = run;
-    h->cmd_dir = dir;
-    h->cmd_step = step;
+    h->global_cmd_run = run;
+    h->global_cmd_dir = dir;
+    h->global_cmd_step = step;
     pthread_mutex_unlock(&h->cmd_mutex);
 }
 
@@ -266,9 +266,9 @@ static void *http_thread_fn(void *arg) {
             if (plen && strncmp(path, "/status", plen) == 0) {
                 char out[256];
                 pthread_mutex_lock(&h->cmd_mutex);
-                bool run = h->cmd_run;
-                int dir = h->cmd_dir;
-                int step = h->cmd_step;
+                bool run = h->global_cmd_run;
+                int dir = h->global_cmd_dir;
+                int step = h->global_cmd_step;
                 pthread_mutex_unlock(&h->cmd_mutex);
                 (void)snprintf(out, sizeof(out), "{\"run\":%s,\"dir\":%d,\"step\":%d}", run ? "true" : "false", dir, step);
                 http_send(cfd, "200 OK", "application/json", out);
@@ -407,18 +407,18 @@ ma_status_t motor_api_set_command(struct motor_api_handle *handle, bool run, int
  * - axis_idx 为 0-based 索引，范围 [0, axis_count)；
  * - 若某轴 axis_run=true，则周期控制中优先使用该轴的 dir/step；
  */
-ma_status_t motor_api_set_axis_command(struct motor_api_handle *handle, int axis_idx, bool run, int dir, int step) {
+ma_status_t motor_api_set_axis_command(struct motor_api_handle *handle, uint16_t axis_idx, bool run, int dir, int step) {
     motor_api_handle_t *h = (motor_api_handle_t *)handle;
     if (!h) return MA_ERR_PARAM;
-    if (axis_idx < 0 || axis_idx >= (int)h->axis_count) return MA_ERR_PARAM;
+    if (axis_idx >= h->axis_count) return MA_ERR_PARAM;
     if (step < 1) step = 1;
     if (step > 100000) step = 100000;
     if (dir != -1 && dir != 0 && dir != 1) dir = 0;
 
     pthread_mutex_lock(&h->cmd_mutex);
-    h->axis_run[axis_idx] = run;
-    h->axis_dir[axis_idx] = dir;
-    h->axis_step[axis_idx] = step;
+    h->axes[axis_idx].cmd_run = run;
+    h->axes[axis_idx].cmd_dir = dir;
+    h->axes[axis_idx].cmd_step = step;
     pthread_mutex_unlock(&h->cmd_mutex);
     return MA_OK;
 }
